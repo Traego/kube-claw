@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: claw-controller
+  labels:
+    app.kubernetes.io/name: claw-controller
+spec:
+  serviceName: claw-controller
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: claw-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: claw-controller
+    spec:
+      serviceAccountName: claw-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --data-dir={{ .Values.controller.dataDir }}
+            - --enable-router={{ .Values.controller.enableRouter }}
+            - --health-probe-bind-address=:{{ .Values.service.probePort }}
+          ports:
+            - name: api
+              containerPort: {{ .Values.service.apiPort }}
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+            - name: probe
+              containerPort: {{ .Values.service.probePort }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.controller.dataDir }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.controller.storage.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.controller.storage.size }}

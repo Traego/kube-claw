@@ -1,0 +1,20 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claw-controller
+  labels:
+    app.kubernetes.io/name: claw-controller
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: claw-controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.service.apiPort }}
+        - protocol: TCP
+          port: {{ .Values.service.metricsPort }}
+        - protocol: TCP
+          port: {{ .Values.service.probePort }}

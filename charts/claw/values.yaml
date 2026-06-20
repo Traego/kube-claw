@@ -1,0 +1,44 @@
+image:
+  repository: ghcr.io/traego/claw-controller
+  tag: dev
+  pullPolicy: IfNotPresent
+
+controller:
+  replicas: 1
+  dataDir: /var/lib/claw
+  enableRouter: true
+  # GKE Autopilot requires resource requests; set explicitly to control sizing/cost.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  storage:
+    size: 20Gi
+    # GKE Autopilot: the default StorageClass is a ZONAL PD. With one replica, a
+    # cross-zone reschedule can't re-attach a zonal disk. Use a regional class
+    # (e.g. "premium-rwo" or a custom regional-pd class). "" = cluster default.
+    storageClassName: ""
+
+service:
+  apiPort: 8443
+  metricsPort: 8080
+  probePort: 8081
+
+# Secret-intake UI (DESIGN.md §8.3). Exposes ONLY /ui/secret-intake/* via Ingress.
+ui:
+  ingress:
+    enabled: false
+    host: claw.example.com
+    className: ""
+    tls:
+      enabled: true
+      secretName: claw-ui-tls
+
+# References to kube-claw-managed secrets (router-owned Slack tokens, master key).
+slack:
+  appTokenSecretRef: slack-app-token
+  botTokenSecretRef: slack-bot-token
+masterKeySecretRef: claw-master-key
