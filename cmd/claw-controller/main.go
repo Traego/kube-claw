@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
+	"github.com/traego/kube-claw/internal/controller"
 )
 
 var scheme = runtime.NewScheme()
@@ -43,6 +44,14 @@ func main() {
 	})
 	if err != nil {
 		log.Error(err, "unable to create manager")
+		os.Exit(1)
+	}
+
+	if err := (&controller.AgentReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		log.Error(err, "unable to set up AgentReconciler")
 		os.Exit(1)
 	}
 
