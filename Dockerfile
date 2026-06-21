@@ -3,8 +3,8 @@
 # Autopilot's non-root requirement.
 FROM golang:1.26 AS build
 WORKDIR /src
-# goproxy.io mirror: the default Google module CDN is blocked on some networks.
-ENV GOPROXY=https://goproxy.io,direct GOTOOLCHAIN=local
+# Pin the toolchain to the base image's Go (no surprise auto-downloads in CI).
+ENV GOTOOLCHAIN=local
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .

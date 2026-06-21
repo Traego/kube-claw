@@ -10,7 +10,14 @@
 // hash-chained (tamper-evident), not merely insert-only.
 package store
 
-import "context"
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// ErrNotFound is returned by read methods when the row does not exist.
+var ErrNotFound = errors.New("store: not found")
 
 // Store is the persistence interface backing the controller.
 type Store interface {
@@ -25,20 +32,47 @@ type Store interface {
 	Close() error
 }
 
-// Tx is the transactional repository surface. Phase 0 establishes the seam and
-// the audit invariant; typed methods (CreateSecret, CreateGrant, RevokeGrant,
-// ListGrantsByAgent, ...) are added alongside their features in later phases.
+// Tx is the transactional repository surface. Typed methods are added alongside
+// their features; Phase 2 ships runs + hash-chained audit. Secret/grant/request
+// methods land in Phases 3-4.
 type Tx interface {
 	// AppendAudit writes a hash-chained, tamper-evident audit row.
 	AppendAudit(ev AuditEvent) error
+
+	// CreateRun inserts a new run.
+	CreateRun(r Run) error
+	// GetRun returns a run by id, or ErrNotFound.
+	GetRun(id string) (Run, error)
+	// ListRuns returns the most recent runs, newest first.
+	ListRuns(limit int) ([]Run, error)
 }
 
 // AuditEvent is one append-only audit record (DESIGN.md §21).
 type AuditEvent struct {
-	Type     string         // e.g. "secret.created", "secret.grant.revoked"
+	Type     string         // e.g. "secret.created", "agentrun.created"
 	RunID    string         // optional
 	GrantID  string         // optional
 	SecretID string         // optional
 	Actor    string         // optional
 	Detail   map[string]any // optional structured detail (never secret values)
 }
+
+// Run is the unit of work and audit visibility (DESIGN.md §22). Source/Input are
+// opaque JSON strings owned by the caller.
+type Run struct {
+	ID             string
+	AgentNamespace string
+	AgentName      string
+	SessionID      string
+	Phase          string // Pending|Blocked|Waking|Running|Succeeded|Failed|...
+	Source         string // JSON
+	Input          string // JSON
+	AssignedPod    string
+	PodUID         string
+	CreatedAt      string
+	StartedAt      string
+	CompletedAt    string
+}
+
+// NowRFC3339 is the canonical timestamp format used for stored rows.
+func NowRFC3339() string { return time.Now().UTC().Format(time.RFC3339Nano) }

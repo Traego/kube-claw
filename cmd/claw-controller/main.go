@@ -6,8 +6,10 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
+	"path/filepath"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -17,7 +19,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
+	"github.com/traego/kube-claw/internal/apihttp"
 	"github.com/traego/kube-claw/internal/controller"
+	"github.com/traego/kube-claw/internal/store/sqlite"
 )
 
 var scheme = runtime.NewScheme()
@@ -28,10 +32,11 @@ func init() {
 }
 
 func main() {
-	var dataDir, probeAddr string
+	var dataDir, probeAddr, apiAddr string
 	var enableRouter bool
 	flag.StringVar(&dataDir, "data-dir", "/var/lib/claw", "directory for the SQLite store")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe bind address")
+	flag.StringVar(&apiAddr, "api-bind-address", ":8443", "HTTP API bind address")
 	flag.BoolVar(&enableRouter, "enable-router", true, "run the embedded Slack router")
 	flag.Parse()
 
@@ -52,6 +57,28 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		log.Error(err, "unable to set up AgentReconciler")
+		os.Exit(1)
+	}
+
+	// Open the SQLite store on the PVC and migrate.
+	st, err := sqlite.Open(context.Background(), filepath.Join(dataDir, "claw.db"))
+	if err != nil {
+		log.Error(err, "unable to open store", "dataDir", dataDir)
+		os.Exit(1)
+	}
+	defer st.Close()
+	if err := st.Migrate(context.Background()); err != nil {
+		log.Error(err, "unable to migrate store")
+		os.Exit(1)
+	}
+
+	// HTTP API (uncached reader so /v1/agents works without waiting on caches).
+	if err := mgr.Add(&apihttp.Server{
+		Addr:   apiAddr,
+		Store:  st,
+		Reader: mgr.GetAPIReader(),
+	}); err != nil {
+		log.Error(err, "unable to add HTTP API server")
 		os.Exit(1)
 	}
 

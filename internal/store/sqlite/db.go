@@ -7,8 +7,13 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no cgo)
 
@@ -66,12 +71,95 @@ type tx struct {
 	tx *sql.Tx
 }
 
-// AppendAudit writes an audit row. Phase 0 records the type only; hash-chaining
-// (prev_hash/row_hash) lands in Phase 2 alongside the full audit model.
+// AppendAudit writes a hash-chained audit row: row_hash = sha256(prev_hash | fields).
+// A consumer can verify the chain by recomputing each row_hash in id order — any
+// edited or removed row breaks the chain (tamper-evident, DESIGN.md §21).
 func (t *tx) AppendAudit(ev store.AuditEvent) error {
-	_, err := t.tx.Exec(`INSERT INTO audit (type) VALUES (?)`, ev.Type)
+	var prev sql.NullString
+	// Last row_hash within this tx (NULL/empty for the first row).
+	_ = t.tx.QueryRow(`SELECT row_hash FROM audit ORDER BY id DESC LIMIT 1`).Scan(&prev)
+
+	detail, err := json.Marshal(ev.Detail)
+	if err != nil {
+		return fmt.Errorf("marshal audit detail: %w", err)
+	}
+	ts := store.NowRFC3339()
+	payload := strings.Join([]string{
+		prev.String, ts, ev.Type, ev.RunID, ev.GrantID, ev.SecretID, ev.Actor, string(detail),
+	}, "|")
+	sum := sha256.Sum256([]byte(payload))
+	rowHash := hex.EncodeToString(sum[:])
+
+	_, err = t.tx.Exec(
+		`INSERT INTO audit (ts,type,run_id,grant_id,secret_id,actor,detail,prev_hash,row_hash)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		ts, ev.Type, ev.RunID, ev.GrantID, ev.SecretID, ev.Actor, string(detail), prev.String, rowHash,
+	)
 	if err != nil {
 		return fmt.Errorf("append audit: %w", err)
 	}
 	return nil
+}
+
+// CreateRun inserts a new run row.
+func (t *tx) CreateRun(r store.Run) error {
+	if r.CreatedAt == "" {
+		r.CreatedAt = store.NowRFC3339()
+	}
+	_, err := t.tx.Exec(
+		`INSERT INTO runs (id,agent_ns,agent_name,session_id,phase,source,input,created_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		r.ID, r.AgentNamespace, r.AgentName, r.SessionID, r.Phase, r.Source, r.Input, r.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create run: %w", err)
+	}
+	return nil
+}
+
+func scanRun(s interface{ Scan(...any) error }) (store.Run, error) {
+	var r store.Run
+	var session, source, input, assigned, podUID, started, completed sql.NullString
+	err := s.Scan(&r.ID, &r.AgentNamespace, &r.AgentName, &session, &r.Phase,
+		&source, &input, &assigned, &podUID, &r.CreatedAt, &started, &completed)
+	if err != nil {
+		return r, err
+	}
+	r.SessionID, r.Source, r.Input = session.String, source.String, input.String
+	r.AssignedPod, r.PodUID = assigned.String, podUID.String
+	r.StartedAt, r.CompletedAt = started.String, completed.String
+	return r, nil
+}
+
+const runCols = `id,agent_ns,agent_name,session_id,phase,source,input,assigned_pod,pod_uid,created_at,started_at,completed_at`
+
+// GetRun returns a run by id, or store.ErrNotFound.
+func (t *tx) GetRun(id string) (store.Run, error) {
+	row := t.tx.QueryRow(`SELECT `+runCols+` FROM runs WHERE id=?`, id)
+	r, err := scanRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.Run{}, store.ErrNotFound
+	}
+	return r, err
+}
+
+// ListRuns returns the most recent runs, newest first.
+func (t *tx) ListRuns(limit int) ([]store.Run, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := t.tx.Query(`SELECT `+runCols+` FROM runs ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
