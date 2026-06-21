@@ -88,7 +88,53 @@ func newSecretCmd() *cobra.Command {
 	}
 	meta.Flags().StringVar(&metaNS, "namespace", "claw-agents", "namespace")
 
-	c.AddCommand(create, put, meta)
+	// requests list
+	var reqStatus string
+	requests := &cobra.Command{Use: "requests", Short: "List secret approval requests", RunE: func(_ *cobra.Command, _ []string) error {
+		q := "/v1/secret-requests"
+		if reqStatus != "" {
+			q += "?status=" + reqStatus
+		}
+		return apiPrint(http.MethodGet, q)
+	}}
+	requests.Flags().StringVar(&reqStatus, "status", "Pending", "filter by status (empty = all)")
+
+	var approver, reason string
+	approve := &cobra.Command{Use: "approve REQUEST_ID", Short: "Approve a request (break-glass)", Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return apiJSON(http.MethodPost, "/v1/secret-requests/"+args[0]+"/approve",
+				map[string]any{"approver": approver, "reason": reason}, nil)
+		}}
+	approve.Flags().StringVar(&approver, "approver", "cli", "approver principal")
+	approve.Flags().StringVar(&reason, "reason", "", "reason")
+
+	var denyReason string
+	deny := &cobra.Command{Use: "deny REQUEST_ID", Short: "Deny a request", Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return apiJSON(http.MethodPost, "/v1/secret-requests/"+args[0]+"/deny",
+				map[string]any{"approver": "cli", "reason": denyReason}, nil)
+		}}
+	deny.Flags().StringVar(&denyReason, "reason", "", "reason")
+
+	// grants
+	var grantsNS, grantsAgent string
+	grants := &cobra.Command{Use: "grants", Short: "List grants", RunE: func(_ *cobra.Command, _ []string) error {
+		return apiPrint(http.MethodGet, "/v1/secret-grants?namespace="+grantsNS+"&agent="+grantsAgent)
+	}}
+	grants.Flags().StringVar(&grantsNS, "namespace", "claw-agents", "namespace")
+	grants.Flags().StringVar(&grantsAgent, "agent", "", "agent name")
+
+	var revokeReason string
+	grant := &cobra.Command{Use: "grant", Short: "Manage grants"}
+	revoke := &cobra.Command{Use: "revoke GRANT_ID", Short: "Revoke a grant", Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return apiJSON(http.MethodPost, "/v1/secret-grants/"+args[0]+"/revoke",
+				map[string]any{"approver": "cli", "reason": revokeReason}, nil)
+		}}
+	revoke.Flags().StringVar(&revokeReason, "reason", "", "reason")
+	grant.AddCommand(revoke)
+
+	c.AddCommand(create, put, meta, requests, approve, deny, grants, grant)
 	return c
 }
 

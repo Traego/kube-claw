@@ -70,6 +70,7 @@ var migrations = []string{
 		agent_name   TEXT,
 		run_id       TEXT,
 		secret_id    TEXT,
+		secret_name  TEXT,
 		image_digest TEXT,
 		context      TEXT,
 		created_at   TEXT NOT NULL

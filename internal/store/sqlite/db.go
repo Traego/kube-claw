@@ -190,6 +190,12 @@ func (t *tx) MarkRunRunning(id, pod string) error {
 	return err
 }
 
+// MarkRunBlocked sets phase=Blocked (awaiting secret approval).
+func (t *tx) MarkRunBlocked(id string) error {
+	_, err := t.tx.Exec(`UPDATE runs SET phase='Blocked' WHERE id=?`, id)
+	return err
+}
+
 // MarkRunSucceeded sets phase=Succeeded and completed_at.
 func (t *tx) MarkRunSucceeded(id string) error {
 	_, err := t.tx.Exec(

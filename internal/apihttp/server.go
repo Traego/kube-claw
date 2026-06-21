@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -73,6 +74,11 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /v1/secrets", s.createSecret)
 	mux.HandleFunc("GET /v1/secrets/{name}/metadata", s.secretMetadata)
 	mux.HandleFunc("PUT /v1/secrets/{name}/versions", s.putSecretVersion)
+	mux.HandleFunc("GET /v1/secret-requests", s.listRequests)
+	mux.HandleFunc("POST /v1/secret-requests/{id}/approve", s.approveRequest)
+	mux.HandleFunc("POST /v1/secret-requests/{id}/deny", s.denyRequest)
+	mux.HandleFunc("GET /v1/secret-grants", s.listGrants)
+	mux.HandleFunc("POST /v1/secret-grants/{id}/revoke", s.revokeGrant)
 	return mux
 }
 
@@ -296,6 +302,131 @@ func (s *Server) putSecretVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stored"})
+}
+
+// --- approval (Phase 4) ---
+
+func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	var reqs []store.SecretRequest
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.ListSecretRequests(status)
+		reqs = got
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if reqs == nil {
+		reqs = []store.SecretRequest{}
+	}
+	writeJSON(w, http.StatusOK, reqs)
+}
+
+type approveReq struct {
+	Approver string `json:"approver"`
+	Reason   string `json:"reason"`
+}
+
+func (s *Server) approveRequest(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body approveReq
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body.Approver == "" {
+		body.Approver = "cli"
+	}
+
+	// Load the request, then the live Agent, to bind the grant to current state.
+	var req store.SecretRequest
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetSecretRequest(id)
+		req = got
+		return e
+	}); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "request not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	binding, err := s.bindingFor(r.Context(), req)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	grant, err := s.Secrets.ApproveRequest(r.Context(), id, body.Approver, body.Reason, binding)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"grant": grant.ID, "status": "approved"})
+}
+
+// bindingFor computes the grant binding from the agent's CURRENT state for the
+// secret named in the request (DESIGN.md §8 — approve what is current).
+func (s *Server) bindingFor(ctx context.Context, req store.SecretRequest) (secrets.GrantBinding, error) {
+	var agent clawv1alpha1.Agent
+	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: req.AgentNamespace, Name: req.AgentName}, &agent); err != nil {
+		return secrets.GrantBinding{}, fmt.Errorf("load agent: %w", err)
+	}
+	for _, sref := range agent.Spec.Secrets {
+		if sref.Name == req.SecretName {
+			return secrets.GrantBinding{
+				ImageDigest:    agent.Status.SelectedImageDigest,
+				AgentSpecHash:  agent.Status.AgentSpecHash,
+				DeliveryHash:   secrets.DeliveryHash(sref.Delivery.Path, sref.Delivery.Mode, sref.Delivery.Env),
+				ServiceAccount: "claw-agent-" + agent.Name,
+			}, nil
+		}
+	}
+	return secrets.GrantBinding{}, fmt.Errorf("agent %s no longer references secret %q", req.AgentName, req.SecretName)
+}
+
+func (s *Server) denyRequest(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body approveReq
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := s.Secrets.DenyRequest(r.Context(), id, body.Approver, body.Reason); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "request not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "denied"})
+}
+
+func (s *Server) listGrants(w http.ResponseWriter, r *http.Request) {
+	ns := r.URL.Query().Get("namespace")
+	agent := r.URL.Query().Get("agent")
+	var grants []store.Grant
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.ListGrants(ns, agent)
+		grants = got
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if grants == nil {
+		grants = []store.Grant{}
+	}
+	writeJSON(w, http.StatusOK, grants)
+}
+
+func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body approveReq
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := s.Secrets.RevokeGrant(r.Context(), id, body.Approver, body.Reason); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "grant not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
 // --- helpers ---

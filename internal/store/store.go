@@ -54,6 +54,8 @@ type Tx interface {
 	ListRunsByPhase(phase string, limit int) ([]Run, error)
 	// MarkRunRunning sets phase=Running, assigned pod, and started_at.
 	MarkRunRunning(id, pod string) error
+	// MarkRunBlocked sets phase=Blocked (awaiting secret approval).
+	MarkRunBlocked(id string) error
 	// MarkRunSucceeded sets phase=Succeeded and completed_at.
 	MarkRunSucceeded(id string) error
 
@@ -79,6 +81,30 @@ type Tx interface {
 	// secret id. Returns ErrNotFound for unknown, ErrTokenUsed for already
 	// consumed, ErrTokenExpired for expired.
 	ConsumeIntakeToken(tokenHash string) (secretID string, err error)
+
+	// --- grants & requests (Phase 4) ---
+
+	// CreateGrant stores a durable grant.
+	CreateGrant(g Grant) error
+	// FindValidGrant returns a non-revoked grant matching the full binding
+	// (agent + secret + digest + spec hash + delivery hash), or ErrNotFound.
+	FindValidGrant(ns, agent, secretID, digest, specHash, deliveryHash string) (Grant, error)
+	// RevokeGrant marks a grant revoked.
+	RevokeGrant(id, reason string) error
+	// ListGrants returns grants for an agent.
+	ListGrants(ns, agent string) ([]Grant, error)
+
+	// CreateSecretRequest stores a pending approval request.
+	CreateSecretRequest(req SecretRequest) error
+	// GetSecretRequest returns a request by id, or ErrNotFound.
+	GetSecretRequest(id string) (SecretRequest, error)
+	// ListSecretRequests returns requests with the given status (all if "").
+	ListSecretRequests(status string) ([]SecretRequest, error)
+	// PendingRequestExists reports whether a Pending request already exists for
+	// this agent+secret (dedupe).
+	PendingRequestExists(ns, agent, secretID string) (bool, error)
+	// SetSecretRequestStatus updates a request's status.
+	SetSecretRequestStatus(id, status string) error
 }
 
 // AuditEvent is one append-only audit record (DESIGN.md §21).
@@ -133,6 +159,39 @@ type SecretVersion struct {
 	Checksum   string // sha256 of plaintext, for integrity checks
 	CreatedAt  string
 	CreatedBy  string
+}
+
+// Grant is a durable authorization (DESIGN.md §8, §14). No expiry/lease — it is
+// valid until revoked or until the image digest / spec hash / delivery hash it
+// binds to changes.
+type Grant struct {
+	ID             string `json:"id"`
+	AgentNamespace string `json:"agentNamespace"`
+	AgentName      string `json:"agentName"`
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+	ImageDigest    string `json:"imageDigest"`
+	AgentSpecHash  string `json:"agentSpecHash"`
+	DeliveryHash   string `json:"deliveryHash"`
+	SecretID       string `json:"secretId"`
+	ApprovedBy     string `json:"approvedBy"`
+	ApprovedAt     string `json:"approvedAt"`
+	Reason         string `json:"reason,omitempty"`
+	RevokedAt      string `json:"revokedAt,omitempty"`
+	RevokedReason  string `json:"revokedReason,omitempty"`
+}
+
+// SecretRequest is a pending approval (DESIGN.md §16).
+type SecretRequest struct {
+	ID             string `json:"id"`
+	Status         string `json:"status"` // Pending|Approved|Denied
+	AgentNamespace string `json:"agentNamespace"`
+	AgentName      string `json:"agentName"`
+	RunID          string `json:"runId,omitempty"`
+	SecretID       string `json:"secretId"`
+	SecretName     string `json:"secretName,omitempty"`
+	ImageDigest    string `json:"imageDigest"`
+	Context        string `json:"context,omitempty"`
+	CreatedAt      string `json:"createdAt"`
 }
 
 // NowRFC3339 is the canonical timestamp format used for stored rows.
