@@ -145,14 +145,32 @@ func (t *tx) GetRun(id string) (store.Run, error) {
 
 // ListRuns returns the most recent runs, newest first.
 func (t *tx) ListRuns(limit int) ([]store.Run, error) {
+	return t.queryRuns(`SELECT `+runCols+` FROM runs ORDER BY created_at DESC LIMIT ?`, limit)
+}
+
+// ListRunsByPhase returns runs in a phase, oldest first (FIFO processing order).
+func (t *tx) ListRunsByPhase(phase string, limit int) ([]store.Run, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := t.tx.Query(`SELECT `+runCols+` FROM runs ORDER BY created_at DESC LIMIT ?`, limit)
+	rows, err := t.tx.Query(`SELECT `+runCols+` FROM runs WHERE phase=? ORDER BY created_at ASC LIMIT ?`, phase, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	return collectRuns(rows)
+}
+
+func (t *tx) queryRuns(q string, args ...any) ([]store.Run, error) {
+	rows, err := t.tx.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectRuns(rows)
+}
+
+func collectRuns(rows *sql.Rows) ([]store.Run, error) {
 	var out []store.Run
 	for rows.Next() {
 		r, err := scanRun(rows)
@@ -160,6 +178,53 @@ func (t *tx) ListRuns(limit int) ([]store.Run, error) {
 			return nil, err
 		}
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// MarkRunRunning sets phase=Running, the assigned pod, and started_at.
+func (t *tx) MarkRunRunning(id, pod string) error {
+	_, err := t.tx.Exec(
+		`UPDATE runs SET phase='Running', assigned_pod=?, started_at=? WHERE id=?`,
+		pod, store.NowRFC3339(), id)
+	return err
+}
+
+// MarkRunSucceeded sets phase=Succeeded and completed_at.
+func (t *tx) MarkRunSucceeded(id string) error {
+	_, err := t.tx.Exec(
+		`UPDATE runs SET phase='Succeeded', completed_at=? WHERE id=?`,
+		store.NowRFC3339(), id)
+	return err
+}
+
+// AppendOutput records an output produced by a run.
+func (t *tx) AppendOutput(runID string, out store.Output) error {
+	ts := out.CreatedAt
+	if ts == "" {
+		ts = store.NowRFC3339()
+	}
+	_, err := t.tx.Exec(
+		`INSERT INTO run_outputs (run_id, kind, content, created_at) VALUES (?,?,?,?)`,
+		runID, out.Kind, out.Content, ts)
+	return err
+}
+
+// ListOutputs returns a run's outputs, oldest first.
+func (t *tx) ListOutputs(runID string) ([]store.Output, error) {
+	rows, err := t.tx.Query(
+		`SELECT kind, content, created_at FROM run_outputs WHERE run_id=? ORDER BY id ASC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.Output
+	for rows.Next() {
+		var o store.Output
+		if err := rows.Scan(&o.Kind, &o.Content, &o.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
 	}
 	return out, rows.Err()
 }

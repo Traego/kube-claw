@@ -10,6 +10,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -21,6 +22,7 @@ import (
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
 	"github.com/traego/kube-claw/internal/apihttp"
 	"github.com/traego/kube-claw/internal/controller"
+	"github.com/traego/kube-claw/internal/runengine"
 	"github.com/traego/kube-claw/internal/store/sqlite"
 )
 
@@ -32,11 +34,13 @@ func init() {
 }
 
 func main() {
-	var dataDir, probeAddr, apiAddr string
+	var dataDir, probeAddr, apiAddr, runnerImage, selfURL string
 	var enableRouter bool
 	flag.StringVar(&dataDir, "data-dir", "/var/lib/claw", "directory for the SQLite store")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe bind address")
 	flag.StringVar(&apiAddr, "api-bind-address", ":8443", "HTTP API bind address")
+	flag.StringVar(&runnerImage, "runner-image", "claw-runner:dev", "image used for agent run Jobs")
+	flag.StringVar(&selfURL, "self-url", "http://claw-controller.claw-system.svc:8443", "in-cluster URL run pods use to reach the controller")
 	flag.BoolVar(&enableRouter, "enable-router", true, "run the embedded Slack router")
 	flag.Parse()
 
@@ -79,6 +83,18 @@ func main() {
 		Reader: mgr.GetAPIReader(),
 	}); err != nil {
 		log.Error(err, "unable to add HTTP API server")
+		os.Exit(1)
+	}
+
+	// Run engine: launches a Job per Pending run (Phase 5 demo slice).
+	if err := mgr.Add(&runengine.Engine{
+		Store:         st,
+		K8s:           mgr.GetClient(),
+		RunnerImage:   runnerImage,
+		ControllerURL: selfURL,
+		Interval:      2 * time.Second,
+	}); err != nil {
+		log.Error(err, "unable to add run engine")
 		os.Exit(1)
 	}
 

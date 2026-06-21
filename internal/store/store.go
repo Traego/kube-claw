@@ -33,8 +33,7 @@ type Store interface {
 }
 
 // Tx is the transactional repository surface. Typed methods are added alongside
-// their features; Phase 2 ships runs + hash-chained audit. Secret/grant/request
-// methods land in Phases 3-4.
+// their features. Secret/grant/request methods land in Phases 3-4.
 type Tx interface {
 	// AppendAudit writes a hash-chained, tamper-evident audit row.
 	AppendAudit(ev AuditEvent) error
@@ -45,6 +44,17 @@ type Tx interface {
 	GetRun(id string) (Run, error)
 	// ListRuns returns the most recent runs, newest first.
 	ListRuns(limit int) ([]Run, error)
+	// ListRunsByPhase returns runs in a given phase, oldest first (FIFO).
+	ListRunsByPhase(phase string, limit int) ([]Run, error)
+	// MarkRunRunning sets phase=Running, assigned pod, and started_at.
+	MarkRunRunning(id, pod string) error
+	// MarkRunSucceeded sets phase=Succeeded and completed_at.
+	MarkRunSucceeded(id string) error
+
+	// AppendOutput records an output produced by a run.
+	AppendOutput(runID string, out Output) error
+	// ListOutputs returns a run's outputs, oldest first.
+	ListOutputs(runID string) ([]Output, error)
 }
 
 // AuditEvent is one append-only audit record (DESIGN.md §21).
@@ -60,18 +70,25 @@ type AuditEvent struct {
 // Run is the unit of work and audit visibility (DESIGN.md §22). Source/Input are
 // opaque JSON strings owned by the caller.
 type Run struct {
-	ID             string
-	AgentNamespace string
-	AgentName      string
-	SessionID      string
-	Phase          string // Pending|Blocked|Waking|Running|Succeeded|Failed|...
-	Source         string // JSON
-	Input          string // JSON
-	AssignedPod    string
-	PodUID         string
-	CreatedAt      string
-	StartedAt      string
-	CompletedAt    string
+	ID             string `json:"id"`
+	AgentNamespace string `json:"agentNamespace"`
+	AgentName      string `json:"agentName"`
+	SessionID      string `json:"sessionId,omitempty"`
+	Phase          string `json:"phase"` // Pending|Blocked|Waking|Running|Succeeded|Failed
+	Source         string `json:"source,omitempty"`
+	Input          string `json:"input,omitempty"`
+	AssignedPod    string `json:"assignedPod,omitempty"`
+	PodUID         string `json:"podUid,omitempty"`
+	CreatedAt      string `json:"createdAt"`
+	StartedAt      string `json:"startedAt,omitempty"`
+	CompletedAt    string `json:"completedAt,omitempty"`
+}
+
+// Output is a single result a run produced (DESIGN.md §22 status.outputs).
+type Output struct {
+	Kind      string `json:"kind"`    // e.g. "text", "slackMessage"
+	Content   string `json:"content"` // never secret material
+	CreatedAt string `json:"createdAt"`
 }
 
 // NowRFC3339 is the canonical timestamp format used for stored rows.

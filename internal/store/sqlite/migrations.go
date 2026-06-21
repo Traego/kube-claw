@@ -89,6 +89,13 @@ var migrations = []string{
 		started_at   TEXT,
 		completed_at TEXT
 	);`,
+	`CREATE TABLE IF NOT EXISTS run_outputs (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		run_id     TEXT NOT NULL,
+		kind       TEXT NOT NULL,
+		content    TEXT NOT NULL,
+		created_at TEXT NOT NULL
+	);`,
 	`CREATE TABLE IF NOT EXISTS sessions (
 		id         TEXT PRIMARY KEY,
 		agent_ns   TEXT NOT NULL,
@@ -113,6 +120,8 @@ var migrations = []string{
 	`CREATE INDEX IF NOT EXISTS grants_by_secret ON grants(secret_id);`,
 	`CREATE INDEX IF NOT EXISTS runs_by_agent    ON runs(agent_ns, agent_name);`,
 	`CREATE INDEX IF NOT EXISTS runs_by_created   ON runs(created_at);`,
+	`CREATE INDEX IF NOT EXISTS runs_by_phase     ON runs(phase);`,
+	`CREATE INDEX IF NOT EXISTS run_outputs_by_run ON run_outputs(run_id);`,
 	`CREATE INDEX IF NOT EXISTS audit_by_ts       ON audit(ts);`,
 }
 

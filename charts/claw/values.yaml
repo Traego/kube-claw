@@ -7,6 +7,10 @@ controller:
   replicas: 1
   dataDir: /var/lib/claw
   enableRouter: true
+  # Image the run engine launches for each run Job (DESIGN.md §11).
+  runnerImage: claw-runner:dev
+  # In-cluster URL run pods use to reach the controller API.
+  selfURL: http://claw-controller.claw-system.svc:8443
   # GKE Autopilot requires resource requests; set explicitly to control sizing/cost.
   resources:
     requests:

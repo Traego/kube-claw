@@ -28,6 +28,9 @@ spec:
             - --data-dir={{ .Values.controller.dataDir }}
             - --enable-router={{ .Values.controller.enableRouter }}
             - --health-probe-bind-address=:{{ .Values.service.probePort }}
+            - --api-bind-address=:{{ .Values.service.apiPort }}
+            - --runner-image={{ .Values.controller.runnerImage }}
+            - --self-url={{ .Values.controller.selfURL }}
           ports:
             - name: api
               containerPort: {{ .Values.service.apiPort }}

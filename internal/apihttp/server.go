@@ -65,6 +65,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/agents", s.listAgents)
 	mux.HandleFunc("POST /v1/runs", s.createRun)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
+	mux.HandleFunc("POST /v1/runs/{id}/outputs", s.postOutput)
 	return mux
 }
 
@@ -134,13 +135,25 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"id": run.ID, "phase": run.Phase})
 }
 
+type runView struct {
+	store.Run
+	Outputs []store.Output `json:"outputs"`
+}
+
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	var run store.Run
+	var view runView
 	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
-		got, e := tx.GetRun(id)
-		run = got
-		return e
+		run, e := tx.GetRun(id)
+		if e != nil {
+			return e
+		}
+		outs, e := tx.ListOutputs(id)
+		if e != nil {
+			return e
+		}
+		view = runView{Run: run, Outputs: outs}
+		return nil
 	})
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "run not found")
@@ -150,7 +163,51 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, run)
+	if view.Outputs == nil {
+		view.Outputs = []store.Output{}
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+type postOutputReq struct {
+	Kind    string `json:"kind"`
+	Content string `json:"content"`
+}
+
+// postOutput records a runner's output and marks the run Succeeded. This is the
+// runner→controller callback (DESIGN.md §36). Auth (claw session token) lands in
+// Phase 5; for now it is unauthenticated on the cluster-internal API.
+func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req postOutputReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Kind == "" {
+		req.Kind = "text"
+	}
+	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		if _, e := tx.GetRun(id); e != nil {
+			return e
+		}
+		if e := tx.AppendOutput(id, store.Output{Kind: req.Kind, Content: req.Content}); e != nil {
+			return e
+		}
+		if e := tx.MarkRunSucceeded(id); e != nil {
+			return e
+		}
+		return tx.AppendAudit(store.AuditEvent{Type: "agentrun.completed", RunID: id, Actor: "runner"})
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }
 
 // --- helpers ---

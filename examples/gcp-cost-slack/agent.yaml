@@ -1,0 +1,38 @@
+apiVersion: claw.run/v1alpha1
+kind: Agent
+metadata:
+  name: gcp-cost
+  namespace: claw-agents
+spec:
+  displayName: GCP Cost Monitor
+  # Digest is a placeholder for the smoke test — Phase 1 only resolves the digest
+  # string into status; it does not pull the image (pod creation is Phase 5).
+  image: ghcr.io/example/claw/gcp-cost@sha256:1111111111111111111111111111111111111111111111111111111111111111
+  runtime:
+    mode: scaleToZeroSession
+    idleTimeout: 15m
+    coldStartReply: "Checking GCP cost data..."
+  storage:
+    workspace:
+      type: pvc
+      size: 1Gi
+      mountPath: /workspace
+    memory:
+      type: pvc
+      size: 1Gi
+      mountPath: /memory
+    cache:
+      type: emptyDir
+      mountPath: /cache
+  secrets:
+    - name: gcp-billing-readonly
+      delivery:
+        type: file
+        path: /var/run/claw/secrets/gcp-billing.json
+        mode: "0400"
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /var/run/claw/secrets/gcp-billing.json
+  network:
+    egressAllowHosts:
+      - bigquery.googleapis.com
+      - cloudbilling.googleapis.com
