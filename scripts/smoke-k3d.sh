@@ -57,24 +57,52 @@ sleep 3
 kubectl -n claw-agents get agent gcp-cost \
   -o jsonpath='{"agent phase="}{.status.phase}{" digest="}{.status.selectedImageDigest}{"\n"}'
 
-# 5. Trigger a run and assert the response.
-kubectl -n claw-system port-forward svc/claw-controller 18443:8443 >/tmp/claw-pf.log 2>&1 &
-PF=$!; trap 'kill $PF 2>/dev/null || true' EXIT
+# 5. Full secret loop: create secret → submit value → run blocks → approve →
+#    bootstrap attests + materializes → runner uses the secret → Succeeded.
+kubectl -n claw-system port-forward svc/claw-controller 18443:8443 >/tmp/claw-pf-api.log 2>&1 &
+PFA=$!
+kubectl -n claw-system port-forward svc/claw-controller 18090:8090 >/tmp/claw-pf-ui.log 2>&1 &
+PFU=$!
+trap 'kill $PFA $PFU 2>/dev/null || true' EXIT
 sleep 4
 
-RID="$(curl -s -X POST http://localhost:18443/v1/runs -H 'content-type: application/json' \
+api=http://localhost:18443
+
+# Create the secret the agent requires + submit its value via the one-time link.
+URL="$(curl -s -X POST "$api/v1/secrets" -H 'content-type: application/json' \
+  -d '{"namespace":"claw-agents","name":"gcp-billing-readonly","type":"gcp.serviceAccountKey","granters":["U_ALEX"]}' \
+  | sed -n 's/.*"intakeURL":"\([^"]*\)".*/\1/p')"
+if [[ -n "$URL" ]]; then
+  curl -s -o /dev/null -X POST "$URL" --data-urlencode 'value={"private_key":"demo-key"}'
+  echo "secret submitted via one-time link"
+fi
+
+RID="$(curl -s -X POST "$api/v1/runs" -H 'content-type: application/json' \
   -d '{"namespace":"claw-agents","agent":"gcp-cost","input":"why did GCP cost spike yesterday?"}' \
   | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
 echo "run: $RID"
+sleep 5
+
+# If blocked on approval, approve the pending request (CLI break-glass path).
+REQ="$(curl -s "$api/v1/secret-requests?status=Pending" | grep -o '"id":"req-[a-f0-9]*"' | head -1 | sed 's/.*"\(req-[a-f0-9]*\)"/\1/')"
+if [[ -n "$REQ" ]]; then
+  echo "approving request $REQ"
+  curl -s -o /dev/null -X POST "$api/v1/secret-requests/$REQ/approve" -d '{"approver":"smoke","reason":"smoke test"}'
+fi
 
 for i in $(seq 1 20); do
-  R="$(curl -s "http://localhost:18443/v1/runs/$RID")"
+  R="$(curl -s "$api/v1/runs/$RID")"
   PHASE="$(echo "$R" | sed -n 's/.*"phase":"\([^"]*\)".*/\1/p')"
   echo "  [$((i*2))s] phase=$PHASE"
   if [[ "$PHASE" == "Succeeded" ]]; then
     echo "SMOKE TEST PASSED"
     echo "$R"
     exit 0
+  fi
+  if [[ "$PHASE" == "Failed" ]]; then
+    echo "SMOKE TEST FAILED: run Failed" >&2
+    kubectl -n claw-agents logs -l "claw.run/run-id=$RID" --tail=20 2>&1 || true
+    exit 1
   fi
   sleep 2
 done

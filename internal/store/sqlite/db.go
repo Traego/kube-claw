@@ -204,6 +204,14 @@ func (t *tx) MarkRunSucceeded(id string) error {
 	return err
 }
 
+// MarkRunFailed sets phase=Failed and completed_at.
+func (t *tx) MarkRunFailed(id string) error {
+	_, err := t.tx.Exec(
+		`UPDATE runs SET phase='Failed', completed_at=? WHERE id=?`,
+		store.NowRFC3339(), id)
+	return err
+}
+
 // AppendOutput records an output produced by a run.
 func (t *tx) AppendOutput(runID string, out store.Output) error {
 	ts := out.CreatedAt

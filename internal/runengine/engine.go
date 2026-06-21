@@ -13,6 +13,7 @@ import (
 	"errors"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -72,7 +73,39 @@ func (e *Engine) tick(ctx context.Context) error {
 	for _, run := range todo {
 		e.evaluate(ctx, run)
 	}
+	e.reapRunning(ctx)
 	return nil
+}
+
+// reapRunning marks a Running run Failed when its Job has failed (otherwise a
+// crashed/un-attestable runner would leave the run Running forever — review gap).
+func (e *Engine) reapRunning(ctx context.Context) {
+	var running []store.Run
+	if err := e.Store.Tx(ctx, func(tx store.Tx) error {
+		rs, err := tx.ListRunsByPhase("Running", 50)
+		running = rs
+		return err
+	}); err != nil {
+		return
+	}
+	lg := logf.Log.WithName("runengine")
+	for _, run := range running {
+		var job batchv1.Job
+		err := e.K8s.Get(ctx, types.NamespacedName{Namespace: run.AgentNamespace, Name: workloads.RunJobName(run)}, &job)
+		if apierrors.IsNotFound(err) || err != nil {
+			continue // job gone (TTL) or transient — leave; output may still arrive
+		}
+		if job.Status.Failed > 0 && job.Status.Active == 0 {
+			_ = e.Store.Tx(ctx, func(tx store.Tx) error {
+				if err := tx.MarkRunFailed(run.ID); err != nil {
+					return err
+				}
+				return tx.AppendAudit(store.AuditEvent{Type: "agentrun.failed", RunID: run.ID, Actor: "runengine",
+					Detail: map[string]any{"reason": "job failed"}})
+			})
+			lg.Info("run marked failed (job failed)", "run", run.ID)
+		}
+	}
 }
 
 // evaluate gates a run on its agent's secret grants, then launches or blocks it.

@@ -58,6 +58,8 @@ type Tx interface {
 	MarkRunBlocked(id string) error
 	// MarkRunSucceeded sets phase=Succeeded and completed_at.
 	MarkRunSucceeded(id string) error
+	// MarkRunFailed sets phase=Failed and completed_at.
+	MarkRunFailed(id string) error
 
 	// AppendOutput records an output produced by a run.
 	AppendOutput(runID string, out Output) error
