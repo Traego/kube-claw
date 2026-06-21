@@ -29,11 +29,15 @@ spec:
             - --enable-router={{ .Values.controller.enableRouter }}
             - --health-probe-bind-address=:{{ .Values.service.probePort }}
             - --api-bind-address=:{{ .Values.service.apiPort }}
+            - --ui-bind-address=:{{ .Values.service.uiPort }}
+            - --ui-base-url={{ .Values.controller.uiBaseURL }}
             - --runner-image={{ .Values.controller.runnerImage }}
             - --self-url={{ .Values.controller.selfURL }}
           ports:
             - name: api
               containerPort: {{ .Values.service.apiPort }}
+            - name: ui
+              containerPort: {{ .Values.service.uiPort }}
             - name: metrics
               containerPort: {{ .Values.service.metricsPort }}
             - name: probe

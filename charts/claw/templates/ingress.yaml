@@ -27,5 +27,5 @@ spec:
               service:
                 name: claw-controller
                 port:
-                  number: {{ .Values.service.apiPort }}
+                  number: {{ .Values.service.uiPort }}
 {{- end }}

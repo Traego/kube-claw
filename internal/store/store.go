@@ -19,6 +19,12 @@ import (
 // ErrNotFound is returned by read methods when the row does not exist.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrTokenUsed / ErrTokenExpired are returned by ConsumeIntakeToken.
+var (
+	ErrTokenUsed    = errors.New("store: intake token already used")
+	ErrTokenExpired = errors.New("store: intake token expired")
+)
+
 // Store is the persistence interface backing the controller.
 type Store interface {
 	// Tx runs fn inside a single (serializable) transaction. fn returning a
@@ -55,6 +61,24 @@ type Tx interface {
 	AppendOutput(runID string, out Output) error
 	// ListOutputs returns a run's outputs, oldest first.
 	ListOutputs(runID string) ([]Output, error)
+
+	// --- secrets (Phase 3) ---
+
+	// CreateSecret inserts secret metadata + granters.
+	CreateSecret(s Secret) error
+	// GetSecret returns secret metadata (incl. granters) by namespace/name.
+	GetSecret(namespace, name string) (Secret, error)
+	// AddSecretVersion stores a new encrypted version.
+	AddSecretVersion(v SecretVersion) error
+	// LatestSecretVersion returns the newest version of a secret.
+	LatestSecretVersion(secretID string) (SecretVersion, error)
+
+	// CreateIntakeToken stores a one-time secret-intake token (hash only).
+	CreateIntakeToken(tokenHash, secretID, expiresAt string) error
+	// ConsumeIntakeToken validates + single-use-consumes a token, returning its
+	// secret id. Returns ErrNotFound for unknown, ErrTokenUsed for already
+	// consumed, ErrTokenExpired for expired.
+	ConsumeIntakeToken(tokenHash string) (secretID string, err error)
 }
 
 // AuditEvent is one append-only audit record (DESIGN.md §21).
@@ -89,6 +113,26 @@ type Output struct {
 	Kind      string `json:"kind"`    // e.g. "text", "slackMessage"
 	Content   string `json:"content"` // never secret material
 	CreatedAt string `json:"createdAt"`
+}
+
+// Secret is secret metadata (the value lives in SecretVersion, encrypted).
+type Secret struct {
+	ID        string   `json:"id"`
+	Namespace string   `json:"namespace"`
+	Name      string   `json:"name"`
+	Type      string   `json:"type,omitempty"`
+	Granters  []string `json:"granters,omitempty"` // PAM: who may approve (DESIGN.md §8)
+	CreatedAt string   `json:"createdAt"`
+}
+
+// SecretVersion is one immutable, encrypted version of a secret's value.
+type SecretVersion struct {
+	ID         string
+	SecretID   string
+	Ciphertext []byte // Tink-encrypted; never logged
+	Checksum   string // sha256 of plaintext, for integrity checks
+	CreatedAt  string
+	CreatedBy  string
 }
 
 // NowRFC3339 is the canonical timestamp format used for stored rows.

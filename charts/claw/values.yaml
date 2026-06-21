@@ -11,6 +11,9 @@ controller:
   runnerImage: claw-runner:dev
   # In-cluster URL run pods use to reach the controller API.
   selfURL: http://claw-controller.claw-system.svc:8443
+  # Public base URL of the secret-intake UI (used in returned links). Override to
+  # the Ingress host in prod, or the port-forwarded localhost in dev.
+  uiBaseURL: http://localhost:8090
   # GKE Autopilot requires resource requests; set explicitly to control sizing/cost.
   resources:
     requests:
@@ -30,6 +33,7 @@ service:
   apiPort: 8443
   metricsPort: 8080
   probePort: 8081
+  uiPort: 8090
 
 # Secret-intake UI (DESIGN.md §8.3). Exposes ONLY /ui/secret-intake/* via Ingress.
 ui:

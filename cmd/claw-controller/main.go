@@ -23,6 +23,7 @@ import (
 	"github.com/traego/kube-claw/internal/apihttp"
 	"github.com/traego/kube-claw/internal/controller"
 	"github.com/traego/kube-claw/internal/runengine"
+	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store/sqlite"
 )
 
@@ -34,11 +35,13 @@ func init() {
 }
 
 func main() {
-	var dataDir, probeAddr, apiAddr, runnerImage, selfURL string
+	var dataDir, probeAddr, apiAddr, uiAddr, uiBaseURL, runnerImage, selfURL string
 	var enableRouter bool
 	flag.StringVar(&dataDir, "data-dir", "/var/lib/claw", "directory for the SQLite store")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe bind address")
 	flag.StringVar(&apiAddr, "api-bind-address", ":8443", "HTTP API bind address")
+	flag.StringVar(&uiAddr, "ui-bind-address", ":8090", "secret-intake UI bind address (separate listener)")
+	flag.StringVar(&uiBaseURL, "ui-base-url", "http://localhost:8090", "public base URL of the intake UI (for returned links)")
 	flag.StringVar(&runnerImage, "runner-image", "claw-runner:dev", "image used for agent run Jobs")
 	flag.StringVar(&selfURL, "self-url", "http://claw-controller.claw-system.svc:8443", "in-cluster URL run pods use to reach the controller")
 	flag.BoolVar(&enableRouter, "enable-router", true, "run the embedded Slack router")
@@ -76,13 +79,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Secret authority: local dev master key on the PVC (prod: KMS-wrapped).
+	cipher, err := secrets.NewLocalCipher(filepath.Join(dataDir, "master.keyset"))
+	if err != nil {
+		log.Error(err, "unable to init cipher")
+		os.Exit(1)
+	}
+	secSvc := &secrets.Service{Store: st, Cipher: cipher}
+
 	// HTTP API (uncached reader so /v1/agents works without waiting on caches).
 	if err := mgr.Add(&apihttp.Server{
-		Addr:   apiAddr,
-		Store:  st,
-		Reader: mgr.GetAPIReader(),
+		Addr:    apiAddr,
+		Store:   st,
+		Reader:  mgr.GetAPIReader(),
+		Secrets: secSvc,
+		UIBase:  uiBaseURL,
 	}); err != nil {
 		log.Error(err, "unable to add HTTP API server")
+		os.Exit(1)
+	}
+
+	// Secret-intake UI on a SEPARATE listener (only /ui/secret-intake/*).
+	if err := mgr.Add(&apihttp.UIServer{Addr: uiAddr, Secrets: secSvc}); err != nil {
+		log.Error(err, "unable to add UI server")
 		os.Exit(1)
 	}
 

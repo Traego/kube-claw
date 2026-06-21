@@ -11,6 +11,9 @@ spec:
     - name: api
       port: {{ .Values.service.apiPort }}
       targetPort: api
+    - name: ui
+      port: {{ .Values.service.uiPort }}
+      targetPort: ui
     - name: metrics
       port: {{ .Values.service.metricsPort }}
       targetPort: metrics

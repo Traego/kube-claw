@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -24,14 +25,17 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	clawv1alpha1 "github.com/traego/kube-claw/api/v1alpha1"
+	"github.com/traego/kube-claw/internal/secrets"
 	"github.com/traego/kube-claw/internal/store"
 )
 
 // Server is a controller-runtime Runnable that serves the HTTP API.
 type Server struct {
-	Addr   string
-	Store  store.Store
-	Reader client.Reader // uncached k8s reader (mgr.GetAPIReader)
+	Addr    string
+	Store   store.Store
+	Reader  client.Reader     // uncached k8s reader (mgr.GetAPIReader)
+	Secrets *secrets.Service  // secret authority
+	UIBase  string            // base URL of the intake UI (for returned links)
 }
 
 // NeedLeaderElection lets the API run on every replica (false = not gated).
@@ -66,6 +70,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /v1/runs", s.createRun)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /v1/runs/{id}/outputs", s.postOutput)
+	mux.HandleFunc("POST /v1/secrets", s.createSecret)
+	mux.HandleFunc("GET /v1/secrets/{name}/metadata", s.secretMetadata)
+	mux.HandleFunc("PUT /v1/secrets/{name}/versions", s.putSecretVersion)
 	return mux
 }
 
@@ -208,6 +215,87 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
+}
+
+// --- secrets (Phase 3) ---
+
+type createSecretReq struct {
+	Namespace string   `json:"namespace"`
+	Name      string   `json:"name"`
+	Type      string   `json:"type"`
+	Granters  []string `json:"granters"`
+}
+
+// createSecret records metadata + granters and mints a one-time intake link.
+func (s *Server) createSecret(w http.ResponseWriter, r *http.Request) {
+	var req createSecretReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Namespace == "" || req.Name == "" {
+		writeErr(w, http.StatusBadRequest, "namespace and name are required")
+		return
+	}
+	sec, err := s.Secrets.CreateSecret(r.Context(), req.Namespace, req.Name, req.Type, req.Granters)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tok, err := s.Secrets.MintIntakeToken(r.Context(), req.Namespace, req.Name)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	path := "/ui/secret-intake/" + tok
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"id":          sec.ID,
+		"intakePath":  path,
+		"intakeURL":   s.UIBase + path,
+	})
+}
+
+func (s *Server) secretMetadata(w http.ResponseWriter, r *http.Request) {
+	ns := r.URL.Query().Get("namespace")
+	name := r.PathValue("name")
+	var sec store.Secret
+	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetSecret(ns, name)
+		sec = got
+		return e
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "secret not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, sec) // metadata only — never the value
+}
+
+// putSecretVersion is the break-glass / CI value upload (DESIGN.md §8.3).
+func (s *Server) putSecretVersion(w http.ResponseWriter, r *http.Request) {
+	ns := r.URL.Query().Get("namespace")
+	name := r.PathValue("name")
+	value, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MiB cap
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "could not read body")
+		return
+	}
+	if len(value) == 0 {
+		writeErr(w, http.StatusBadRequest, "empty value")
+		return
+	}
+	if err := s.Secrets.PutValue(r.Context(), ns, name, value, "cli"); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "secret not found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stored"})
 }
 
 // --- helpers ---

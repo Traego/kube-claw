@@ -15,6 +15,8 @@ spec:
         - protocol: TCP
           port: {{ .Values.service.apiPort }}
         - protocol: TCP
+          port: {{ .Values.service.uiPort }}
+        - protocol: TCP
           port: {{ .Values.service.metricsPort }}
         - protocol: TCP
           port: {{ .Values.service.probePort }}
