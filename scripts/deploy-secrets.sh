@@ -5,12 +5,12 @@
 # Usage:
 #   1. Create .secrets.env (gitignored) in the repo root:
 #        SLACK_APP_TOKEN=xapp-...        # Socket Mode app-level token
-#        SLACK_BOT_TOKEN=xoxb-...        # bot token (needs chat:write)
+#        SLACK_BOT_TOKEN=xoxb-...        # bot token (chat:write, reactions:write)
 #        ANTHROPIC_API_KEY=sk-ant-...    # powers the agent loop
-#        SLACK_CHANNEL=C0123ABC          # optional: channel to monitor
-#        SLACK_AGENT=assistant           # optional: agent for that channel (default: assistant)
-#        SLACK_MENTION=true              # optional: only @mentions trigger (default: true)
 #   2. ./scripts/deploy-secrets.sh [path-to-secrets-file]
+#
+# Channels are NOT configured here — add the bot to any channel and it DMs the
+# inviter to ask how it should behave (active vs @-only, in-channel vs threads).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="${1:-$ROOT/.secrets.env}"
@@ -22,8 +22,6 @@ set -a; . "$ENV_FILE"; set +a
 
 : "${SLACK_APP_TOKEN:?set SLACK_APP_TOKEN in $ENV_FILE}"
 : "${SLACK_BOT_TOKEN:?set SLACK_BOT_TOKEN in $ENV_FILE}"
-SLACK_AGENT="${SLACK_AGENT:-assistant}"
-SLACK_MENTION="${SLACK_MENTION:-true}"
 
 echo "Creating Slack token Secret in $NS..."
 kubectl -n "$NS" create secret generic claw-slack-tokens \
@@ -36,15 +34,8 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     --from-literal=api-key="$ANTHROPIC_API_KEY" --dry-run=client -o yaml | kubectl apply -f -
 fi
 
-helm_args=(--reuse-values --set slack.enabled=true)
-if [ -n "${SLACK_CHANNEL:-}" ]; then
-  routes="[{\"channels\":[\"$SLACK_CHANNEL\"],\"mentionRequired\":$SLACK_MENTION,\"agentNamespace\":\"$AGENTS_NS\",\"agentName\":\"$SLACK_AGENT\"}]"
-  helm_args+=(--set-json "slack.routes=$routes")
-  echo "Routing $SLACK_CHANNEL -> $SLACK_AGENT (mentionRequired=$SLACK_MENTION)"
-fi
-
 echo "helm upgrade..."
-helm upgrade claw "$ROOT/charts/claw" -n "$NS" "${helm_args[@]}"
+helm upgrade claw "$ROOT/charts/claw" -n "$NS" --reuse-values --set slack.enabled=true
 kubectl -n "$NS" rollout restart statefulset/claw-controller
 kubectl -n "$NS" rollout status statefulset/claw-controller --timeout=120s
 

@@ -72,6 +72,27 @@ func slackSource(source string) slackSrc {
 	return s
 }
 
+// PostOnboarding DMs the inviter (or posts in-channel) asking how the bot should
+// behave in a channel it was just added to: active vs @-only, and in-channel vs
+// threads-only. Each button stores a channel config when clicked.
+func (n *Notifier) PostOnboarding(ctx context.Context, target, channel, ns, agent string) error {
+	hdr := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn",
+		fmt.Sprintf(":wave: I was added to <#%s>. How should I behave there? (agent: `%s`)", channel, agent),
+		false, false), nil, nil)
+	mk := func(i int, text string, mention, thread bool) *slack.ButtonBlockElement {
+		return slack.NewButtonBlockElement(fmt.Sprintf("onb%d", i), onboardValue(channel, ns, agent, mention, thread),
+			slack.NewTextBlockObject("plain_text", text, true, false))
+	}
+	actions := slack.NewActionBlock("claw-onboard",
+		mk(0, "Active · in channel", false, false),
+		mk(1, "Active · threads only", false, true),
+		mk(2, "@mentions · in channel", true, false),
+		mk(3, "@mentions · threads only", true, true),
+	)
+	_, _, err := n.api.PostMessageContext(ctx, target, slack.MsgOptionBlocks(hdr, actions))
+	return err
+}
+
 // AddReaction adds an emoji reaction to a message (e.g. 🤔 while the agent
 // works). Needs the bot's reactions:write scope.
 func (n *Notifier) AddReaction(ctx context.Context, channel, ts, name string) error {

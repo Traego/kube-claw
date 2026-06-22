@@ -51,12 +51,84 @@ func (c Config) MatchRoute(channel string, mentioned bool) *Route {
 
 // Router ties Slack events to runs + approvals. (Transport is wired in socket.go.)
 type Router struct {
-	Config    Config
-	Store     store.Store
-	Approvals *approvals.Service
-	Secrets   *secrets.Service // for DM-based secret registration
-	Notifier  *Notifier        // for DM replies
-	UIBase    string           // intake link base URL
+	Config       Config
+	Store        store.Store
+	Approvals    *approvals.Service
+	Secrets      *secrets.Service // for DM-based secret registration
+	Notifier     *Notifier        // for DM replies
+	UIBase       string           // intake link base URL
+	BotUserID    string           // this bot's Slack user id (set at connect)
+	DefaultAgent string           // agent assigned when a channel is onboarded
+	AgentsNS     string           // namespace for onboarded agents (default claw-agents)
+}
+
+// resolveRoute matches a channel to an agent: static Helm routes first, then a
+// dynamic channel config set via the onboarding flow.
+func (r *Router) resolveRoute(ctx context.Context, channel string, mentioned bool) *Route {
+	if rt := r.Config.MatchRoute(channel, mentioned); rt != nil {
+		return rt
+	}
+	var cfg store.ChannelConfig
+	found := false
+	_ = r.Store.Tx(ctx, func(tx store.Tx) error {
+		c, e := tx.GetChannelConfig(channel)
+		if e == nil {
+			cfg, found = c, true
+		}
+		return nil
+	})
+	if !found || (cfg.MentionRequired && !mentioned) {
+		return nil
+	}
+	return &Route{Channels: []string{channel}, MentionRequired: cfg.MentionRequired,
+		AgentNamespace: cfg.AgentNamespace, AgentName: cfg.AgentName}
+}
+
+// onboardValue encodes a preset button: "onboard|<channel>|<agentNs>|<agent>|<mention>|<thread>".
+func onboardValue(channel, ns, agent string, mention, thread bool) string {
+	return fmt.Sprintf("onboard|%s|%s|%s|%d|%d", channel, ns, agent, b2i(mention), b2i(thread))
+}
+
+func (r *Router) agentsNS() string {
+	if r.AgentsNS != "" {
+		return r.AgentsNS
+	}
+	return "claw-agents"
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// HandleOnboard applies an onboarding choice (a channel preset) and returns a
+// confirmation message. Value format from onboardValue.
+func (r *Router) HandleOnboard(ctx context.Context, value string) string {
+	parts := strings.Split(value, "|")
+	if len(parts) != 6 || parts[0] != "onboard" {
+		return "couldn't read that choice"
+	}
+	channel, ns, agent := parts[1], parts[2], parts[3]
+	mention, thread := parts[4] == "1", parts[5] == "1"
+	if err := r.Store.Tx(ctx, func(tx store.Tx) error {
+		return tx.SetChannelConfig(store.ChannelConfig{
+			Channel: channel, AgentNamespace: ns, AgentName: agent,
+			MentionRequired: mention, ThreadOnly: thread,
+		})
+	}); err != nil {
+		return "couldn't save: " + err.Error()
+	}
+	watch := "every message"
+	if mention {
+		watch = "only when @mentioned"
+	}
+	where := "in the channel"
+	if thread {
+		where = "in threads only"
+	}
+	return fmt.Sprintf("Got it — in <#%s> I'll respond to *%s* and post *%s*, handled by agent `%s`.", channel, watch, where, agent)
 }
 
 // HandleDM handles a direct message to the bot. Today it supports secret
@@ -104,7 +176,7 @@ func parseRegisterSecret(text string) (name, description string) {
 // HandleMessage dedupes a Slack event and, if it matches a route, creates a run.
 // Returns the new run id ("" if deduped or unmatched).
 func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID, text string, mentioned bool) (string, error) {
-	route := r.Config.MatchRoute(channel, mentioned)
+	route := r.resolveRoute(ctx, channel, mentioned)
 	if route == nil {
 		return "", nil
 	}

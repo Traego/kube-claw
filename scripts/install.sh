@@ -35,16 +35,8 @@ if [[ "$yn" =~ ^[Yy] ]]; then
       --dry-run=client -o yaml | kubectl apply -f -
     slack_args=(--set slack.enabled=true)
     echo "  stored tokens in Secret claw-slack-tokens"
-
-    read -rp "  Channel ID to monitor (e.g. C0123ABC, blank to configure later): " ch
-    if [[ -n "$ch" ]]; then
-      read -rp "  Agent to handle it [gcp-cost]: " ag; ag="${ag:-gcp-cost}"
-      read -rp "  Only respond to @mentions? [Y/n]: " m
-      ment=true; [[ "$m" =~ ^[Nn] ]] && ment=false
-      routes="[{\"channels\":[\"$ch\"],\"mentionRequired\":$ment,\"agentNamespace\":\"$AGENTS_NS\",\"agentName\":\"$ag\"}]"
-      slack_args+=(--set-json "slack.routes=$routes")
-      echo "  routing $ch → $ag (mentionRequired=$ment)"
-    fi
+    echo "  (no channel to configure — add the bot to any channel and it will"
+    echo "   DM the inviter to ask how it should behave there)"
   fi
 fi
 

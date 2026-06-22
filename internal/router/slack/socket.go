@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"strings"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -30,6 +31,10 @@ func (r *Runnable) Start(ctx context.Context) error {
 func (r *Router) Start(ctx context.Context, appToken, botToken string) error {
 	lg := logf.Log.WithName("slack")
 	api := slack.New(botToken, slack.OptionAppLevelToken(appToken))
+	if at, err := api.AuthTestContext(ctx); err == nil {
+		r.BotUserID = at.UserID
+		lg.Info("slack identity", "botUser", at.UserID)
+	}
 	sm := socketmode.New(api)
 
 	go func() {
@@ -62,6 +67,20 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 		return
 	}
 	switch e := api.InnerEvent.Data.(type) {
+	case *slackevents.MemberJoinedChannelEvent:
+		// The bot itself was added to a channel → ask the inviter how to behave.
+		if e.User != r.BotUserID || r.Notifier == nil {
+			return
+		}
+		target := e.Inviter
+		if target == "" {
+			target = e.Channel // no inviter (e.g. created with the app) → ask in-channel
+		}
+		if err := r.Notifier.PostOnboarding(ctx, target, e.Channel, r.agentsNS(), r.DefaultAgent); err != nil {
+			lg.Error(err, "post onboarding")
+		} else {
+			lg.Info("posted onboarding prompt", "channel", e.Channel, "inviter", e.Inviter)
+		}
 	case *slackevents.AppMentionEvent:
 		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), e.Text, true)
 		if err != nil {
@@ -122,7 +141,12 @@ func (r *Router) onInteractive(ctx context.Context, api *slack.Client, evt socke
 		return
 	}
 	for _, a := range cb.ActionCallback.BlockActions {
-		msg := r.HandleApproval(ctx, a.Value, cb.User.ID)
+		var msg string
+		if strings.HasPrefix(a.Value, "onboard|") {
+			msg = r.HandleOnboard(ctx, a.Value)
+		} else {
+			msg = r.HandleApproval(ctx, a.Value, cb.User.ID)
+		}
 		_, _, _ = api.PostMessage(cb.Channel.ID, slack.MsgOptionText(msg, false))
 	}
 }

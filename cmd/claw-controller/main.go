@@ -40,7 +40,7 @@ func init() {
 }
 
 func main() {
-	var dataDir, probeAddr, apiAddr, uiAddr, uiBaseURL, runnerImage, selfURL, anthropicSecret string
+	var dataDir, probeAddr, apiAddr, uiAddr, uiBaseURL, runnerImage, selfURL, anthropicSecret, defaultAgent string
 	var enableRouter bool
 	flag.StringVar(&dataDir, "data-dir", "/var/lib/claw", "directory for the SQLite store")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe bind address")
@@ -50,6 +50,7 @@ func main() {
 	flag.StringVar(&runnerImage, "runner-image", "claw-runner:dev", "image used for agent run Jobs")
 	flag.StringVar(&selfURL, "self-url", "http://claw-controller.claw-system.svc:8443", "in-cluster URL run pods use to reach the controller")
 	flag.StringVar(&anthropicSecret, "anthropic-secret", "claw-anthropic-key", "K8s secret (key \"api-key\") injected into run pods for the agent loop")
+	flag.StringVar(&defaultAgent, "default-agent", "assistant", "agent assigned when a Slack channel is onboarded")
 	flag.BoolVar(&enableRouter, "enable-router", true, "run the embedded Slack router")
 	flag.Parse()
 
@@ -122,8 +123,9 @@ func main() {
 		slackRt = &slackrouter.Router{
 			Config: slackrouter.Config{Routes: routes}, Store: st, Approvals: approvalSvc,
 			Secrets: secSvc, Notifier: slackNotifier, UIBase: uiBaseURL,
+			DefaultAgent: defaultAgent, AgentsNS: "claw-agents",
 		}
-		log.Info("slack router configured", "routes", len(routes))
+		log.Info("slack router configured", "routes", len(routes), "defaultAgent", defaultAgent)
 	}
 
 	// HTTP API (uncached reader so /v1/agents works without waiting on caches).

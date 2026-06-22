@@ -139,6 +139,27 @@ type Tx interface {
 	GetPrompt(ns, name string) (Prompt, error)
 	// ListPrompts returns all stored prompts.
 	ListPrompts() ([]Prompt, error)
+
+	// --- dynamic channel configs (Slack onboarding) ---
+
+	// SetChannelConfig creates or replaces a channel's bot behavior.
+	SetChannelConfig(c ChannelConfig) error
+	// GetChannelConfig returns a channel's config, or ErrNotFound.
+	GetChannelConfig(channel string) (ChannelConfig, error)
+	// ListChannelConfigs returns all configured channels.
+	ListChannelConfigs() ([]ChannelConfig, error)
+}
+
+// ChannelConfig is per-Slack-channel bot behavior, set via the onboarding flow
+// when the bot is added to a channel. It is a dynamic routing rule (alongside
+// the static Helm routes).
+type ChannelConfig struct {
+	Channel         string
+	AgentNamespace  string
+	AgentName       string
+	MentionRequired bool // true = only @mentions trigger; false = active participant
+	ThreadOnly      bool // true = reply only in threads; false = may reply in-channel
+	UpdatedAt       string
 }
 
 // Prompt is an editable system prompt for an agent (DESIGN.md §agent-loop). It

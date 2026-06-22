@@ -131,6 +131,14 @@ var migrations = []string{
 		updated_at TEXT NOT NULL,
 		PRIMARY KEY (agent_ns, agent_name)
 	);`,
+	`CREATE TABLE IF NOT EXISTS channel_configs (
+		channel          TEXT PRIMARY KEY,
+		agent_ns         TEXT NOT NULL,
+		agent_name       TEXT NOT NULL,
+		mention_required INTEGER NOT NULL DEFAULT 1,
+		thread_only      INTEGER NOT NULL DEFAULT 1,
+		updated_at       TEXT NOT NULL
+	);`,
 
 	`CREATE INDEX IF NOT EXISTS grants_by_agent  ON grants(agent_ns, agent_name);`,
 	`CREATE INDEX IF NOT EXISTS grants_by_secret ON grants(secret_id);`,

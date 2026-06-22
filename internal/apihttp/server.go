@@ -263,11 +263,18 @@ func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// #2: post the agent's reply back to the originating Slack thread, and clear
-	// the 🤔 we added to the triggering message.
+	// #2: post the agent's reply back to Slack, and clear the 👀 on the
+	// triggering message. Channel config decides thread vs in-channel.
 	if s.Notifier != nil {
 		if ch := slackrouter.SlackChannel(run.Source); ch != "" {
-			if e := s.Notifier.PostReply(r.Context(), ch, run.SessionID, req.Content); e != nil {
+			threadTS := run.SessionID // default: reply in-thread
+			_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+				if cfg, e := tx.GetChannelConfig(ch); e == nil && !cfg.ThreadOnly {
+					threadTS = "" // channel allows top-level replies
+				}
+				return nil
+			})
+			if e := s.Notifier.PostReply(r.Context(), ch, threadTS, req.Content); e != nil {
 				logf.Log.WithName("apihttp").Error(e, "post slack reply", "run", id)
 			}
 			if ts := slackrouter.SlackEventTS(run.Source); ts != "" {
