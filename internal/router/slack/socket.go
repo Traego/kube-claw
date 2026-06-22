@@ -68,6 +68,7 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 			lg.Error(err, "handle app_mention")
 		} else if runID != "" {
 			lg.Info("created run from mention", "run", runID, "channel", e.Channel)
+			r.react(ctx, e.Channel, e.TimeStamp)
 		}
 	case *slackevents.MessageEvent:
 		if e.BotID != "" {
@@ -83,12 +84,35 @@ func (r *Router) onEvent(ctx context.Context, evt socketmode.Event) {
 			}
 			return
 		}
+		// A reply in a thread the bot started continues that conversation (no
+		// @mention needed); otherwise fall back to route matching.
+		if e.ThreadTimeStamp != "" && e.ThreadTimeStamp != e.TimeStamp {
+			if runID, err := r.HandleThreadReply(ctx, e.TimeStamp, e.Channel, e.ThreadTimeStamp, e.Text); err != nil {
+				lg.Error(err, "handle thread reply")
+			} else if runID != "" {
+				lg.Info("created follow-up run from thread reply", "run", runID, "channel", e.Channel)
+				r.react(ctx, e.Channel, e.TimeStamp)
+				return
+			}
+		}
 		runID, err := r.HandleMessage(ctx, e.TimeStamp, e.Channel, threadOr(e.ThreadTimeStamp, e.TimeStamp), e.Text, false)
 		if err != nil {
 			lg.Error(err, "handle message")
 		} else if runID != "" {
 			lg.Info("created run from message", "run", runID, "channel", e.Channel)
+			r.react(ctx, e.Channel, e.TimeStamp)
 		}
+	}
+}
+
+// react adds a 👀 to the triggering message the moment we start a run, so the
+// user sees the message was picked up and a container is spinning up.
+func (r *Router) react(ctx context.Context, channel, ts string) {
+	if r.Notifier == nil {
+		return
+	}
+	if err := r.Notifier.AddReaction(ctx, channel, ts, "eyes"); err != nil {
+		logf.Log.WithName("slack").Error(err, "add eyes reaction")
 	}
 }
 

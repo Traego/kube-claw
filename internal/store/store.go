@@ -52,6 +52,12 @@ type Tx interface {
 	ListRuns(limit int) ([]Run, error)
 	// ListRunsByPhase returns runs in a given phase, oldest first (FIFO).
 	ListRunsByPhase(phase string, limit int) ([]Run, error)
+	// ListRunsBySession returns runs in a session (Slack thread), oldest first.
+	ListRunsBySession(sessionID string, limit int) ([]Run, error)
+	// ClaimNextPendingTurn atomically claims the oldest Pending run in a session
+	// (marking it Running on the given pod) so a warm session pod can pick up
+	// follow-up turns. Returns ok=false if none are pending.
+	ClaimNextPendingTurn(sessionID, pod string) (Run, bool, error)
 	// MarkRunRunning sets phase=Running, assigned pod, and started_at.
 	MarkRunRunning(id, pod string) error
 	// MarkRunBlocked sets phase=Blocked (awaiting secret approval).

@@ -7,6 +7,8 @@
 package workloads
 
 import (
+	"strings"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -22,14 +24,21 @@ func RunJobName(run store.Run) string { return run.ID }
 
 // BuildRunJob builds the one-shot Job for a run. It runs as the agent's
 // ServiceAccount (claw-agent-<name>) with a locked-down pod security context.
-func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText, systemPrompt, anthropicSecret string) *batchv1.Job {
+func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText, systemPrompt, anthropicSecret, idleTimeout string) *batchv1.Job {
+	if idleTimeout == "" {
+		idleTimeout = "5m"
+	}
 	env := []corev1.EnvVar{
 		{Name: "CLAW_RUN_ID", Value: run.ID},
 		{Name: "CLAW_AGENT_NAME", Value: run.AgentName},
 		{Name: "CLAW_AGENT_NAMESPACE", Value: run.AgentNamespace},
+		{Name: "CLAW_SESSION_ID", Value: run.SessionID},
 		{Name: "CLAW_CONTROLLER_URL", Value: controllerURL},
 		{Name: "CLAW_INPUT", Value: inputText},
 		{Name: "CLAW_SYSTEM_PROMPT", Value: systemPrompt},
+		// Warm-session idle timeout: the pod waits this long for a follow-up turn
+		// after answering, resetting on each new turn, before scaling to zero.
+		{Name: "CLAW_IDLE_TIMEOUT", Value: idleTimeout},
 		{Name: "CLAW_SECRETS_DIR", Value: "/var/run/claw/secrets"},
 		{Name: "CLAW_SA_TOKEN_FILE", Value: "/var/run/claw/sa-token/token"},
 		{Name: "HOME", Value: "/workspace"},
@@ -50,11 +59,18 @@ func BuildRunJob(run store.Run, runnerImage, controllerURL, inputText, systemPro
 func buildJob(run store.Run, runnerImage string, env []corev1.EnvVar) *batchv1.Job {
 	backoff := int32(1)
 	ttl := int32(600)
-	deadline := int64(120)
+	// Max session lifetime cap (the runner's idle timeout is the real control;
+	// this is a hard ceiling so a wedged pod can't live forever).
+	deadline := int64(1800)
 	labels := map[string]string{
 		"app.kubernetes.io/managed-by": "kube-claw",
 		"claw.run/agent":               run.AgentName,
 		"claw.run/run-id":              run.ID,
+	}
+	// Session label lets the engine find the warm pod for a Slack thread and
+	// avoid launching a second one for follow-up turns.
+	if run.SessionID != "" {
+		labels["claw.run/session"] = SessionLabel(run.SessionID)
 	}
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -126,3 +142,13 @@ func buildJob(run store.Run, runnerImage string, env []corev1.EnvVar) *batchv1.J
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// SessionLabel makes a Slack thread ts a valid k8s label value (dots → dashes,
+// capped at 63 chars). The engine and the Job builder must agree on this.
+func SessionLabel(sessionID string) string {
+	s := strings.ReplaceAll(sessionID, ".", "-")
+	if len(s) > 63 {
+		s = s[:63]
+	}
+	return s
+}

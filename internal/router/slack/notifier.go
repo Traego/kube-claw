@@ -52,14 +52,33 @@ func (n *Notifier) PostApproval(ctx context.Context, channel, threadTS, secretNa
 }
 
 // SlackChannel extracts the channel from a run's Source JSON (set by
-// HandleMessage as {"trigger":"slack","channel":"..."}). Empty if not Slack.
-func SlackChannel(source string) string {
-	var s struct {
-		Trigger string `json:"trigger"`
-		Channel string `json:"channel"`
-	}
+// HandleMessage as {"trigger":"slack","channel":"...","event":"..."}).
+func SlackChannel(source string) string { return slackSource(source).Channel }
+
+// SlackEventTS extracts the triggering message ts from a run's Source JSON.
+func SlackEventTS(source string) string { return slackSource(source).Event }
+
+type slackSrc struct {
+	Trigger string `json:"trigger"`
+	Channel string `json:"channel"`
+	Event   string `json:"event"`
+}
+
+func slackSource(source string) slackSrc {
+	var s slackSrc
 	if json.Unmarshal([]byte(source), &s) != nil || s.Trigger != "slack" {
-		return ""
+		return slackSrc{}
 	}
-	return s.Channel
+	return s
+}
+
+// AddReaction adds an emoji reaction to a message (e.g. 🤔 while the agent
+// works). Needs the bot's reactions:write scope.
+func (n *Notifier) AddReaction(ctx context.Context, channel, ts, name string) error {
+	return n.api.AddReactionContext(ctx, name, slack.ItemRef{Channel: channel, Timestamp: ts})
+}
+
+// RemoveReaction removes a previously-added reaction (best-effort).
+func (n *Notifier) RemoveReaction(ctx context.Context, channel, ts, name string) error {
+	return n.api.RemoveReactionContext(ctx, name, slack.ItemRef{Channel: channel, Timestamp: ts})
 }

@@ -148,7 +148,30 @@ func (e *Engine) evaluate(ctx context.Context, run store.Run) {
 		}
 		return
 	}
+	// Warm-session routing: if a pod is already serving this Slack thread, leave
+	// the run Pending — that pod claims it as a follow-up turn (in-memory history,
+	// no new pod, no re-materialized secrets). Self-heals if the pod has exited.
+	if run.SessionID != "" && e.sessionPodActive(ctx, run.AgentNamespace, run.SessionID) {
+		lg.Info("follow-up turn — warm session pod will claim it", "session", run.SessionID)
+		return
+	}
 	e.launch(ctx, run, &agent)
+}
+
+// sessionPodActive reports whether a run Job for this session is still running.
+func (e *Engine) sessionPodActive(ctx context.Context, ns, sessionID string) bool {
+	var jobs batchv1.JobList
+	if err := e.K8s.List(ctx, &jobs,
+		client.InNamespace(ns),
+		client.MatchingLabels{"claw.run/session": workloads.SessionLabel(sessionID)}); err != nil {
+		return false
+	}
+	for i := range jobs.Items {
+		if jobs.Items[i].Status.Active > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveImage picks the image for a run's Job: a registered base image
@@ -255,7 +278,11 @@ func (e *Engine) launch(ctx context.Context, run store.Run, agent *clawv1alpha1.
 
 	image := e.resolveImage(ctx, agent)
 	prompt := e.resolvePrompt(ctx, agent)
-	job := workloads.BuildRunJob(run, image, e.ControllerURL, inputText(run.Input), prompt, e.AnthropicSecret)
+	idle := agent.Spec.Runtime.IdleTimeout
+	if idle == "" {
+		idle = "5m"
+	}
+	job := workloads.BuildRunJob(run, image, e.ControllerURL, inputText(run.Input), prompt, e.AnthropicSecret, idle)
 	if err := e.K8s.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
 		lg.Error(err, "create job")
 		return

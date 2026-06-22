@@ -132,6 +132,51 @@ func (r *Router) HandleMessage(ctx context.Context, eventID, channel, sessionID,
 	return runID, nil
 }
 
+// HandleThreadReply continues a conversation: a reply in a thread the bot is
+// already engaged in creates a follow-up run for the same agent (no @mention
+// needed). Returns "" if the thread has no prior bot run (so we ignore it).
+func (r *Router) HandleThreadReply(ctx context.Context, eventID, channel, threadTS, text string) (string, error) {
+	var prior store.Run
+	found := false
+	if err := r.Store.Tx(ctx, func(tx store.Tx) error {
+		runs, e := tx.ListRunsBySession(threadTS, 1)
+		if e != nil {
+			return e
+		}
+		if len(runs) > 0 {
+			prior, found = runs[0], true
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	if !found {
+		return "", nil // not a thread the bot started
+	}
+	runID := "run-" + randHex()
+	created := false
+	err := r.Store.Tx(ctx, func(tx store.Tx) error {
+		dup, err := tx.SeenEvent("slack", eventID)
+		if err != nil || dup {
+			return err
+		}
+		if err := tx.CreateRun(store.Run{
+			ID: runID, AgentNamespace: prior.AgentNamespace, AgentName: prior.AgentName,
+			SessionID: threadTS, Phase: "Pending",
+			Source: fmt.Sprintf(`{"trigger":"slack","channel":%q,"event":%q}`, channel, eventID),
+			Input:  fmt.Sprintf(`{"text":%q}`, text),
+		}); err != nil {
+			return err
+		}
+		created = true
+		return tx.AppendAudit(store.AuditEvent{Type: "connector.thread_reply", RunID: runID, Actor: "slack"})
+	})
+	if err != nil || !created {
+		return "", err
+	}
+	return runID, nil
+}
+
 // ActionValue encodes an approve/deny button payload: "approve|<reqID>".
 func ActionValue(action, reqID string) string { return action + "|" + reqID }
 

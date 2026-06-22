@@ -11,15 +11,17 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// runAgent runs a Claude tool-use loop (DESIGN.md §agent-loop). It gives the
-// model a single `bash` tool that executes in this isolated, ephemeral container
-// — where the cloud CLIs (gcloud/aws/az) and the materialized secrets already
-// live — and loops until the model produces a final answer. The model is the
-// latest Opus with adaptive thinking. ANTHROPIC_API_KEY is injected by the run
-// engine from a platform secret; if absent, the caller falls back to the stub.
-func runAgent(ctx context.Context, systemPrompt, input string) (string, error) {
-	client := anthropic.NewClient() // reads ANTHROPIC_API_KEY from env
+// agentSession is one warm Slack thread: a Claude tool-use loop (claude-opus-4-8,
+// adaptive thinking, a bash tool) whose message history persists across turns in
+// memory — so follow-up messages continue the same conversation without replay.
+type agentSession struct {
+	client   anthropic.Client
+	sys      string
+	tools    []anthropic.ToolUnionParam
+	messages []anthropic.MessageParam
+}
 
+func newAgentSession(systemPrompt string) *agentSession {
 	sys := strings.TrimSpace(systemPrompt)
 	if sys == "" {
 		sys = "You are a cloud operations assistant."
@@ -37,7 +39,7 @@ func runAgent(ctx context.Context, systemPrompt, input string) (string, error) {
 			notes = append(notes, "Available secret: "+d)
 		}
 	}
-	notes = append(notes, "Prefer read-only commands. Answer the user's question concisely, then stop.")
+	notes = append(notes, "Prefer read-only commands. Answer the user's question concisely, then stop. This is a chat thread — you may be asked follow-up questions.")
 	sys = sys + "\n\n" + strings.Join(notes, "\n")
 
 	bashTool := anthropic.ToolParam{
@@ -50,24 +52,33 @@ func runAgent(ctx context.Context, systemPrompt, input string) (string, error) {
 			Required: []string{"command"},
 		},
 	}
-	tools := []anthropic.ToolUnionParam{{OfTool: &bashTool}}
-	messages := []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(input))}
+	return &agentSession{
+		client: anthropic.NewClient(), // reads ANTHROPIC_API_KEY
+		sys:    sys,
+		tools:  []anthropic.ToolUnionParam{{OfTool: &bashTool}},
+	}
+}
+
+// turn runs one user message to a final answer, executing bash tool calls along
+// the way. History accumulates on the session for the next turn.
+func (s *agentSession) turn(ctx context.Context, userText string) (string, error) {
+	s.messages = append(s.messages, anthropic.NewUserMessage(anthropic.NewTextBlock(userText)))
 	adaptive := anthropic.ThinkingConfigAdaptiveParam{}
 
 	var final []string
-	for i := 0; i < 12; i++ { // bound the agentic loop
-		resp, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+	for i := 0; i < 12; i++ { // bound the agentic loop per turn
+		resp, err := s.client.Messages.New(ctx, anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeOpus4_8,
 			MaxTokens: 4096,
-			System:    []anthropic.TextBlockParam{{Text: sys}},
+			System:    []anthropic.TextBlockParam{{Text: s.sys}},
 			Thinking:  anthropic.ThinkingConfigParamUnion{OfAdaptive: &adaptive},
-			Tools:     tools,
-			Messages:  messages,
+			Tools:     s.tools,
+			Messages:  s.messages,
 		})
 		if err != nil {
 			return "", err
 		}
-		messages = append(messages, resp.ToParam())
+		s.messages = append(s.messages, resp.ToParam())
 
 		var turn []string
 		var toolResults []anthropic.ContentBlockParamUnion
@@ -86,12 +97,12 @@ func runAgent(ctx context.Context, systemPrompt, input string) (string, error) {
 			}
 		}
 		if len(turn) > 0 {
-			final = turn // keep the most recent turn's text as the answer
+			final = turn
 		}
 		if resp.StopReason != anthropic.StopReasonToolUse {
 			break
 		}
-		messages = append(messages, anthropic.NewUserMessage(toolResults...))
+		s.messages = append(s.messages, anthropic.NewUserMessage(toolResults...))
 	}
 	answer := strings.Join(final, "\n\n")
 	if answer == "" {

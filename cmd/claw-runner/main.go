@@ -28,29 +28,117 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Real agent loop when an Anthropic key is present; otherwise the stub so
-	// local/no-key runs still prove the materialize→respond path.
-	var response string
-	if os.Getenv("ANTHROPIC_API_KEY") != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		ans, err := runAgent(ctx, os.Getenv("CLAW_SYSTEM_PROMPT"), input)
-		cancel()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "claw-runner: agent loop failed: %v\n", err)
-			response = "Agent error: " + err.Error()
-		} else {
-			response = ans
+	// Without a key, the stub still proves the materialize→respond path.
+	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+		response := respond(input)
+		fmt.Printf("claw-runner: run=%s input=%q -> %q\n", runID, input, response)
+		if err := postOutput(controllerURL, runID, response); err != nil {
+			fmt.Fprintf(os.Stderr, "claw-runner: posting output: %v\n", err)
+			os.Exit(1)
 		}
-	} else {
-		response = respond(input)
+		return
 	}
-	fmt.Printf("claw-runner: run=%s input=%q -> %q\n", runID, input, response)
 
-	if err := postOutput(controllerURL, runID, response); err != nil {
+	// Real agent loop. Turn 1 is CLAW_INPUT; then, for a Slack session, stay warm
+	// and claim follow-up turns until the idle timeout (the pod scales to zero).
+	sess := newAgentSession(os.Getenv("CLAW_SYSTEM_PROMPT"))
+	answer := turn(sess, runID, input)
+	if err := postOutput(controllerURL, runID, answer); err != nil {
 		fmt.Fprintf(os.Stderr, "claw-runner: posting output: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("claw-runner: output recorded, exiting 0")
+
+	sessionID := os.Getenv("CLAW_SESSION_ID")
+	if sessionID == "" {
+		fmt.Println("claw-runner: no session — exiting 0")
+		return
+	}
+	warmLoop(sess, controllerURL, sessionID)
+}
+
+// turn runs one message to an answer string (errors become a visible reply).
+func turn(sess *agentSession, runID, input string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	ans, err := sess.turn(ctx, input)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "claw-runner: agent turn failed: %v\n", err)
+		return "Agent error: " + err.Error()
+	}
+	fmt.Printf("claw-runner: run=%s input=%q -> %q\n", runID, input, ans)
+	return ans
+}
+
+// warmLoop keeps the pod alive, claiming follow-up turns for this Slack thread
+// until idle for CLAW_IDLE_TIMEOUT (reset on each turn — the "bumpable" timeout).
+func warmLoop(sess *agentSession, controllerURL, sessionID string) {
+	idle := parseDurationOr(os.Getenv("CLAW_IDLE_TIMEOUT"), 5*time.Minute)
+	pod := os.Getenv("HOSTNAME")
+	fmt.Printf("claw-runner: warm session %s (idle timeout %s)\n", sessionID, idle)
+	lastActivity := time.Now()
+	for {
+		runID, input, ok := claimNextTurn(controllerURL, sessionID, pod)
+		if ok {
+			ans := turn(sess, runID, input)
+			if err := postOutput(controllerURL, runID, ans); err != nil {
+				fmt.Fprintf(os.Stderr, "claw-runner: posting follow-up output: %v\n", err)
+			}
+			lastActivity = time.Now() // bump the idle timer
+			continue
+		}
+		if time.Since(lastActivity) >= idle {
+			fmt.Println("claw-runner: idle timeout reached — scaling to zero, exiting 0")
+			signalSleep(controllerURL, sessionID)
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+}
+
+func parseDurationOr(s string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
+
+// signalSleep tells the controller the session has gone idle so it can mark the
+// thread's top-level message with 💤 (best-effort).
+func signalSleep(controllerURL, sessionID string) {
+	url := fmt.Sprintf("%s/v1/sessions/%s/sleep", controllerURL, sessionID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return
+	}
+	if resp, err := http.DefaultClient.Do(req); err == nil {
+		resp.Body.Close()
+	}
+}
+
+// claimNextTurn claims the next pending follow-up turn for this session, if any.
+func claimNextTurn(controllerURL, sessionID, pod string) (runID, input string, ok bool) {
+	url := fmt.Sprintf("%s/v1/sessions/%s/claim-next?pod=%s", controllerURL, sessionID, pod)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return "", "", false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", false // 204 = nothing pending
+	}
+	var out struct{ RunID, Input string }
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return "", "", false
+	}
+	return out.RunID, out.Input, true
 }
 
 // respond is the stub "agent". It proves the materialized credential is present

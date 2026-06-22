@@ -7,8 +7,8 @@ import (
 )
 
 func TestBuildRunJob(t *testing.T) {
-	run := store.Run{ID: "run-abc", AgentName: "gcp-cost", AgentNamespace: "claw-agents"}
-	job := BuildRunJob(run, "claw-runner:dev", "http://claw-controller.claw-system.svc:8443", "why did cost spike?", "You are a cost bot.", "claw-anthropic-key")
+	run := store.Run{ID: "run-abc", AgentName: "gcp-cost", AgentNamespace: "claw-agents", SessionID: "1782140687.401159"}
+	job := BuildRunJob(run, "claw-runner:dev", "http://claw-controller.claw-system.svc:8443", "why did cost spike?", "You are a cost bot.", "claw-anthropic-key", "10m")
 
 	if job.Name != "run-abc" || job.Namespace != "claw-agents" {
 		t.Fatalf("job name/ns = %s/%s", job.Name, job.Namespace)
@@ -32,6 +32,12 @@ func TestBuildRunJob(t *testing.T) {
 	}
 	if env["CLAW_SYSTEM_PROMPT"] != "You are a cost bot." {
 		t.Errorf("CLAW_SYSTEM_PROMPT = %q", env["CLAW_SYSTEM_PROMPT"])
+	}
+	if env["CLAW_IDLE_TIMEOUT"] != "10m" || env["CLAW_SESSION_ID"] != "1782140687.401159" {
+		t.Errorf("idle/session env = %q / %q", env["CLAW_IDLE_TIMEOUT"], env["CLAW_SESSION_ID"])
+	}
+	if job.Labels["claw.run/session"] != "1782140687-401159" {
+		t.Errorf("session label = %q, want 1782140687-401159", job.Labels["claw.run/session"])
 	}
 	var hasKey bool
 	for _, e := range pod.Containers[0].Env {

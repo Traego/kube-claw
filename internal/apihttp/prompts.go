@@ -6,8 +6,57 @@ import (
 	"html"
 	"net/http"
 
+	slackrouter "github.com/traego/kube-claw/internal/router/slack"
 	"github.com/traego/kube-claw/internal/store"
 )
+
+// claimNextTurn lets a warm session pod claim the next pending turn (Slack
+// follow-up message) in its thread. 204 when there's nothing pending.
+func (s *Server) claimNextTurn(w http.ResponseWriter, r *http.Request) {
+	sid := r.PathValue("id")
+	pod := r.URL.Query().Get("pod")
+	var run store.Run
+	var ok bool
+	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, claimed, e := tx.ClaimNextPendingTurn(sid, pod)
+		run, ok = got, claimed
+		return e
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var in struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal([]byte(run.Input), &in)
+	writeJSON(w, http.StatusOK, map[string]string{"runId": run.ID, "input": in.Text})
+}
+
+// sessionSleep is called by a warm pod when it idles out — it adds a 💤 to the
+// thread's top-level message (the session id IS that message's ts) so the channel
+// sees the agent went to sleep.
+func (s *Server) sessionSleep(w http.ResponseWriter, r *http.Request) {
+	sid := r.PathValue("id")
+	if s.Notifier != nil {
+		var channel string
+		_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+			runs, e := tx.ListRunsBySession(sid, 1)
+			if e == nil && len(runs) > 0 {
+				channel = slackrouter.SlackChannel(runs[0].Source)
+			}
+			return e
+		})
+		if channel != "" {
+			_ = s.Notifier.AddReaction(r.Context(), channel, sid, "zzz")
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
 
 type setPromptReq struct {
 	Namespace string `json:"namespace"`

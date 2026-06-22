@@ -161,6 +161,34 @@ func (t *tx) ListRunsByPhase(phase string, limit int) ([]store.Run, error) {
 	return collectRuns(rows)
 }
 
+// ListRunsBySession returns runs in a session (Slack thread), oldest first —
+// the basis for multi-turn conversation history.
+func (t *tx) ListRunsBySession(sessionID string, limit int) ([]store.Run, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	return t.queryRuns(`SELECT `+runCols+` FROM runs WHERE session_id=? ORDER BY created_at ASC LIMIT ?`, sessionID, limit)
+}
+
+// ClaimNextPendingTurn claims the oldest Pending run in a session for a warm
+// pod. The single-writer SQLite tx makes the read+mark atomic.
+func (t *tx) ClaimNextPendingTurn(sessionID, pod string) (store.Run, bool, error) {
+	row := t.tx.QueryRow(
+		`SELECT `+runCols+` FROM runs WHERE session_id=? AND phase='Pending' ORDER BY created_at ASC LIMIT 1`, sessionID)
+	r, err := scanRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.Run{}, false, nil
+	}
+	if err != nil {
+		return store.Run{}, false, err
+	}
+	if err := t.MarkRunRunning(r.ID, pod); err != nil {
+		return store.Run{}, false, err
+	}
+	r.Phase = "Running"
+	return r, true, nil
+}
+
 func (t *tx) queryRuns(q string, args ...any) ([]store.Run, error) {
 	rows, err := t.tx.Query(q, args...)
 	if err != nil {
