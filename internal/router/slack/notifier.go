@@ -76,20 +76,29 @@ func slackSource(source string) slackSrc {
 // behave in a channel it was just added to: active vs @-only, and in-channel vs
 // threads-only. Each button stores a channel config when clicked.
 func (n *Notifier) PostOnboarding(ctx context.Context, target, channel, ns, agent string) error {
-	hdr := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn",
-		fmt.Sprintf(":wave: I was added to <#%s>. How should I behave there? (agent: `%s`)", channel, agent),
+	intro := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn",
+		fmt.Sprintf(":wave: Hi! I'm an AI assistant you can put to work right here in Slack — ask me a question and I'll spin up a sandboxed agent (`%s`) to answer. You just added me to <#%s>, so I need to know how you'd like me to behave in *this* channel.",
+			agent, channel), false, false), nil, nil)
+	explain := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn",
+		"*1. When should I respond?*\n"+
+			"   • *Watch all* — I read every message in the channel and respond when I can help.\n"+
+			"   • *Only @mentions* — I stay quiet unless you `@`-mention me directly.\n\n"+
+			"*2. Where should my replies go?*\n"+
+			"   • *In channel* — my replies post in the channel, visible to everyone.\n"+
+			"   • *In threads* — my replies stay in a thread under your message, keeping the channel tidy.\n\n"+
+			"Pick the combination that fits (you can change it later by removing and re-adding me):",
 		false, false), nil, nil)
 	mk := func(i int, text string, mention, thread bool) *slack.ButtonBlockElement {
 		return slack.NewButtonBlockElement(fmt.Sprintf("onb%d", i), onboardValue(channel, ns, agent, mention, thread),
 			slack.NewTextBlockObject("plain_text", text, true, false))
 	}
 	actions := slack.NewActionBlock("claw-onboard",
-		mk(0, "Active · in channel", false, false),
-		mk(1, "Active · threads only", false, true),
-		mk(2, "@mentions · in channel", true, false),
-		mk(3, "@mentions · threads only", true, true),
+		mk(0, "Watch all · reply in channel", false, false),
+		mk(1, "Watch all · reply in thread", false, true),
+		mk(2, "Only @mentions · in channel", true, false),
+		mk(3, "Only @mentions · in thread", true, true),
 	)
-	_, _, err := n.api.PostMessageContext(ctx, target, slack.MsgOptionBlocks(hdr, actions))
+	_, _, err := n.api.PostMessageContext(ctx, target, slack.MsgOptionBlocks(intro, explain, actions))
 	return err
 }
 
