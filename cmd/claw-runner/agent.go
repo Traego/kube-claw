@@ -71,6 +71,9 @@ func newAgentSession(systemPrompt string) *agentSession {
 			Properties: map[string]any{
 				"name":        map[string]any{"type": "string", "description": "short secret name, e.g. gcp-billing-readonly"},
 				"description": map[string]any{"type": "string", "description": "what the secret is and how you'll use it"},
+				"env_var": map[string]any{"type": "string", "description": "OPTIONAL: the env var that should point at the credential file, " +
+					"e.g. GOOGLE_APPLICATION_CREDENTIALS for a GCP service-account key, AWS_SHARED_CREDENTIALS_FILE for AWS. " +
+					"Set GOOGLE_APPLICATION_CREDENTIALS for GCP keys and I'll also activate it for the gcloud CLI. Leave empty to just get the file path."},
 			},
 			Required: []string{"name", "description"},
 		},
@@ -119,9 +122,13 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 				var result string
 				switch v.Name {
 				case "request_secret":
-					var in struct{ Name, Description string }
+					var in struct {
+						Name        string `json:"name"`
+						Description string `json:"description"`
+						EnvVar      string `json:"env_var"`
+					}
 					_ = json.Unmarshal(raw, &in)
-					result = s.requestSecret(ctx, in.Name, in.Description)
+					result = s.requestSecret(ctx, in.Name, in.Description, in.EnvVar)
 				default: // bash
 					var in struct {
 						Command string `json:"command"`
@@ -150,7 +157,7 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 // requestSecret asks the controller to collect a credential on demand: it DMs
 // the user an intake link, then polls until the value is provided, writes it to
 // the tmpfs secrets dir, and points $GOOGLE_APPLICATION_CREDENTIALS at it.
-func (s *agentSession) requestSecret(ctx context.Context, name, description string) string {
+func (s *agentSession) requestSecret(ctx context.Context, name, description, envVar string) string {
 	if s.controllerURL == "" || s.runID == "" || s.token == "" {
 		return "request_secret is unavailable in this run (no controller binding)."
 	}
@@ -166,18 +173,22 @@ func (s *agentSession) requestSecret(ctx context.Context, name, description stri
 		if ok {
 			if err := os.MkdirAll("/var/run/claw/secrets", 0o700); err == nil {
 				if werr := os.WriteFile(path, content, 0o400); werr == nil {
-					// bq + client libs read GOOGLE_APPLICATION_CREDENTIALS; the gcloud
-					// CLI does not, so also activate the service account for gcloud.
-					_ = os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", path)
 					extra := ""
-					if haveCLI("gcloud") {
+					// Expose it however the agent asked — generic, not GCP-only.
+					if envVar != "" {
+						_ = os.Setenv(envVar, path)
+						extra = fmt.Sprintf(" $%s points to it.", envVar)
+					}
+					// GCP keys: the gcloud CLI ignores GOOGLE_APPLICATION_CREDENTIALS,
+					// so also activate the service account for it.
+					if envVar == "GOOGLE_APPLICATION_CREDENTIALS" && haveCLI("gcloud") {
 						actx, cancel := context.WithTimeout(ctx, 60*time.Second)
 						out, aerr := exec.CommandContext(actx, "gcloud", "auth", "activate-service-account", "--key-file="+path).CombinedOutput()
 						cancel()
 						if aerr == nil {
-							extra = " I've activated it for gcloud, and $GOOGLE_APPLICATION_CREDENTIALS is set for bq."
+							extra += " I've also activated it for the gcloud CLI."
 						} else {
-							extra = " (note: gcloud activate-service-account said: " + firstLine(out) + ")"
+							extra += " (gcloud activate-service-account said: " + firstLine(out) + ")"
 						}
 					}
 					return fmt.Sprintf("Got it — *%s* is now available at %s.%s Retry your task now.", name, path, extra)
