@@ -52,6 +52,12 @@ metadata:
   labels:
     app.kubernetes.io/name: claw-controller
   annotations:
+    {{- with .Values.ui.ingress.className }}
+    # GKE keys the external HTTP(S) LB off this annotation; the ingressClassName
+    # field needs a registered IngressClass (GKE doesn't create a "gce" one), so
+    # using the annotation is what actually provisions the LB.
+    kubernetes.io/ingress.class: {{ . | quote }}
+    {{- end }}
     {{- with $gke.staticIpName }}
     kubernetes.io/ingress.global-static-ip-name: {{ . | quote }}
     {{- end }}
@@ -59,9 +65,6 @@ metadata:
     networking.gke.io/managed-certificates: claw-ui-cert
     {{- end }}
 spec:
-  {{- with .Values.ui.ingress.className }}
-  ingressClassName: {{ . }}
-  {{- end }}
   {{- if .Values.ui.ingress.tls.enabled }}
   tls:
     - hosts:
