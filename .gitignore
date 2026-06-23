@@ -12,3 +12,4 @@ Dockerfile.*-prebuilt
 *.secrets.env
 .secrets.env
 secrets.env
+scripts/up-gke.sh
