@@ -110,10 +110,13 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/dashboard", s.dashboardHome)
 	mux.HandleFunc("GET /ui/secrets", s.secretsPage)
 	mux.HandleFunc("POST /ui/secrets/rotate", s.rotateSecret)
+	mux.HandleFunc("POST /ui/secrets/delete", s.deleteSecret)
 	mux.HandleFunc("GET /ui/conversations", s.conversationsPage)
 	mux.HandleFunc("GET /ui/agents", s.agentsPage)
 	mux.HandleFunc("POST /ui/agents/idle", s.agentSetIdle)
 	mux.HandleFunc("POST /ui/agents/create", s.uiCreateAgent)
+	mux.HandleFunc("GET /ui/agents/edit", s.agentEditPage)
+	mux.HandleFunc("POST /ui/agents/update", s.agentUpdate)
 	mux.HandleFunc("GET /ui/channels", s.channelsPage)
 	return mux
 }

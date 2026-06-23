@@ -99,6 +99,30 @@ func (t *tx) ListSecrets() ([]store.Secret, error) {
 	return out, nil
 }
 
+// DeleteSecret removes a secret and its dependent rows (versions, granters,
+// grants). The audit log is left intact.
+func (t *tx) DeleteSecret(namespace, name string) error {
+	var id string
+	err := t.tx.QueryRow(`SELECT id FROM secrets WHERE namespace=? AND name=?`, namespace, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	for _, q := range []string{
+		`DELETE FROM secret_versions WHERE secret_id=?`,
+		`DELETE FROM secret_granters WHERE secret_id=?`,
+		`DELETE FROM grants WHERE secret_id=?`,
+		`DELETE FROM secrets WHERE id=?`,
+	} {
+		if _, e := t.tx.Exec(q, id); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
 // AddSecretVersion stores a new encrypted version.
 func (t *tx) AddSecretVersion(v store.SecretVersion) error {
 	if v.CreatedAt == "" {

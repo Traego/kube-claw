@@ -14,115 +14,6 @@ value never enters the model's context or the logs.
 
 ---
 
-## Why it's interesting
-
-- **One CRD.** The entire model is a single `Agent` resource (`claw.run/v1alpha1`).
-  No mesh of CRDs for secrets, runs, or storage.
-- **Secrets as a first-class authority, not env-var sprawl.** Values are encrypted
-  with Google Tink (AES-256-GCM envelope; KMS-swappable), released to a workload
-  only after a **durable grant** bound to the image digest + agent spec, with a
-  hash-chained audit log. The agent gets a file path, never the value in-context.
-- **Credential collection on demand.** When an agent discovers it needs a key it
-  doesn't have, it calls `request_secret` → the user gets a **one-time intake link**
-  in Slack → pastes the value → it's materialized straight into the pod's tmpfs.
-- **Warm, multi-turn sessions.** A Slack thread maps to a pod that stays warm for a
-  configurable idle timeout, keeping conversation history in memory; a follow-up
-  that lands on a cold pod **replays the thread from the store**.
-- **LLM image routing.** The controller classifies each request against the
-  base-image registry's "when to use" descriptions and picks the right tool image
-  (gcloud vs aws vs a general image) — no manual per-channel wiring.
-- **Self-configuring channels.** Add the bot to a channel and it DMs the inviter to
-  ask how it should behave (active vs @-mentions only, in-channel vs threads).
-- **Locked-down pods.** Non-root, read-only root filesystem, dropped capabilities,
-  tmpfs secrets, projected SA token, deny-ingress NetworkPolicy.
-- **Self-hosted admin UI.** Secrets (rotate, never view), conversations for audit,
-  agents, base images, prompts, channels.
-
----
-
-## Architecture
-
-```
-                          Slack (Socket Mode)
-                                  │  @mention / thread reply / DM
-                                  ▼
-┌──────────────────────────── claw-controller (control plane) ───────────────────────────┐
-│  Slack router ──▶ LLM image router ──▶ creates a Run (SQLite, hash-chained audit)         │
-│  Agent reconciler (controller-runtime)   Secret authority (Tink envelope crypto)          │
-│  HTTP API + /login attestation + materialize     Admin UI (/ui)                           │
-│  Run engine: gate on secret grants → launch a Job per ready run                           │
-└───────────────────────────────────────────────────────────────────────────────────────┘
-                                  │ launches
-                                  ▼
-                    ┌──────────── Run pod (per Slack thread) ───────────┐
-                    │  claw-bootstrap (PID1): /login → materialize → exec │
-                    │  claw-runner: Claude tool-use loop                  │
-                    │    tools: bash (gcloud/aws/az/curl…) + request_secret│
-                    │  non-root · ro-rootfs · tmpfs secrets · warm/idle    │
-                    └─────────────────────────────────────────────────────┘
-```
-
-The store sits behind a `Store` interface (SQLite by default, swappable for
-Postgres/Spanner). The cipher is KMS-swappable (local dev key by default).
-
----
-
-## Core concepts
-
-### The `Agent` CRD
-
-```yaml
-apiVersion: claw.run/v1alpha1
-kind: Agent
-metadata:
-  name: gcp-cost
-  namespace: claw-agents
-spec:
-  baseImageRef: gcloud          # registered base image (or `image:` for a pinned digest)
-  runtime:
-    mode: scaleToZeroSession
-    idleTimeout: 15m            # how long the pod stays warm for follow-ups (editable in the UI)
-  model:
-    systemPrompt: "You are a read-only GCP cost assistant."
-  secrets:                      # declared secrets are gated + materialized at launch
-    - name: gcp-billing-readonly
-      delivery: { type: file, path: /var/run/claw/secrets/gcp.json, env: { GOOGLE_APPLICATION_CREDENTIALS: /var/run/claw/secrets/gcp.json } }
-```
-
-Agents can be created without YAML via the CLI/API (`claw agent create …`), which
-creates the CRD on your behalf.
-
-### The agent loop
-
-`claw-runner` runs a Claude tool-use loop (model `claude-opus-4-8`, adaptive
-thinking) with two tools:
-
-- **`bash`** — runs shell commands in the container (whatever the base image
-  provides: `gcloud`/`bq`, `aws`, `az`, `curl`, `python3`, …).
-- **`request_secret`** — requests *and* retrieves a credential on demand (DMs the
-  user an intake link, then installs the provided value into the pod and wires up
-  the env var / `gcloud auth`).
-
-Without an Anthropic key the runner falls back to a stub (still proves the
-materialize → respond path).
-
-### Secret authority
-
-Secrets are **not** Kubernetes Secrets or env vars. They live in the controller's
-store, encrypted with Tink. A workload receives a secret only when:
-
-1. A **grant** exists, bound to `agent + secret + image digest + spec hash + delivery hash`.
-2. The pod **attests** via `/login` (Kubernetes SA TokenReview → pod UID from the
-   bound token's claims, closing co-resident replay) and gets a scoped session token.
-3. `materialize` returns the decrypted value to `claw-bootstrap`, written to a
-   tmpfs volume — never to the model context or logs.
-
-Grants are durable (no leases); they're invalidated when the image digest or spec
-changes, or on explicit revoke. Approvals are PAM-style: configurable granters
-approve via Slack buttons, or the requesting user self-services via an intake link.
-
----
-
 ## Quickstart (local, k3d)
 
 **Prerequisites:** Docker, [k3d](https://k3d.io), `kubectl`, `helm`, Go 1.26, and a
@@ -173,9 +64,121 @@ Add the bot to a channel — it DMs you to pick how it behaves. Then:
 @your-bot check our GCP spend over the last 3 days and suggest savings
 ```
 
-→ 👀 reaction → the router picks the `gcloud` image → the agent calls
-`request_secret` → you paste a read-only billing key via the one-time link →
-it runs `bq`/`gcloud` and answers in-thread, then stays warm for follow-ups.
+→ 👀 reaction → the router picks the **best-fit agent** (which carries its own
+image + prompt) → the agent calls `request_secret` → you paste a read-only billing
+key via the one-time link → it runs `bq`/`gcloud` and answers in-thread, then stays
+warm for follow-ups.
+
+---
+
+## Why it's interesting
+
+- **One CRD.** The entire model is a single `Agent` resource (`claw.run/v1alpha1`).
+  No mesh of CRDs for secrets, runs, or storage.
+- **Secrets as a first-class authority, not env-var sprawl.** Values are encrypted
+  with Google Tink (AES-256-GCM envelope; KMS-swappable), released to a workload
+  only after a **durable grant** bound to the image digest + agent spec, with a
+  hash-chained audit log. The agent gets a file path, never the value in-context.
+- **Credential collection on demand.** When an agent discovers it needs a key it
+  doesn't have, it calls `request_secret` → the user gets a **one-time intake link**
+  in Slack → pastes the value → it's materialized straight into the pod's tmpfs.
+- **Warm, multi-turn sessions.** A Slack thread maps to a pod that stays warm for a
+  configurable idle timeout, keeping conversation history in memory; a follow-up
+  that lands on a cold pod **replays the thread from the store**.
+- **LLM agent routing.** Each agent pairs a prompt with an image; the controller
+  classifies each request and spawns the **best-fit agent** for it — no manual
+  per-channel wiring.
+- **Self-configuring channels.** Add the bot to a channel and it DMs the inviter to
+  ask how it should behave (active vs @-mentions only, in-channel vs threads).
+- **Locked-down pods.** Non-root, read-only root filesystem, dropped capabilities,
+  tmpfs secrets, projected SA token, deny-ingress NetworkPolicy.
+- **Self-hosted admin UI.** Secrets (rotate, never view), conversations for audit,
+  agents (create/edit), base images, prompts, channels.
+
+---
+
+## Architecture
+
+```
+                          Slack (Socket Mode)
+                                  │  @mention / thread reply / DM
+                                  ▼
+┌──────────────────────────── claw-controller (control plane) ───────────────────────────┐
+│  Slack router ──▶ LLM agent router ──▶ creates a Run (SQLite, hash-chained audit)         │
+│  Agent reconciler (controller-runtime)   Secret authority (Tink envelope crypto)          │
+│  HTTP API + /login attestation + materialize     Admin UI (/ui)                           │
+│  Run engine: gate on secret grants → launch a Job per ready run                           │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+                                  │ launches
+                                  ▼
+                    ┌──────────── Run pod (per Slack thread) ───────────┐
+                    │  claw-bootstrap (PID1): /login → materialize → exec │
+                    │  claw-runner: Claude tool-use loop                  │
+                    │    tools: bash (gcloud/aws/az/curl…) + request_secret│
+                    │  non-root · ro-rootfs · tmpfs secrets · warm/idle    │
+                    └─────────────────────────────────────────────────────┘
+```
+
+The store sits behind a `Store` interface (SQLite by default, swappable for
+Postgres/Spanner). The cipher is KMS-swappable (local dev key by default).
+
+---
+
+## Core concepts
+
+### The `Agent` CRD
+
+```yaml
+apiVersion: claw.run/v1alpha1
+kind: Agent
+metadata:
+  name: gcp-cost
+  namespace: claw-agents
+spec:
+  baseImageRef: gcloud          # registered base image (or `image:` for a pinned digest)
+  runtime:
+    mode: scaleToZeroSession
+    idleTimeout: 15m            # how long the pod stays warm for follow-ups (editable in the UI)
+  model:
+    systemPrompt: "You are a read-only GCP cost assistant."
+  secrets:                      # declared secrets are gated + materialized at launch
+    - name: gcp-billing-readonly
+      delivery: { type: file, path: /var/run/claw/secrets/gcp.json, env: { GOOGLE_APPLICATION_CREDENTIALS: /var/run/claw/secrets/gcp.json } }
+```
+
+Agents can be created/edited without YAML via the CLI/API (`claw agent create …`)
+or the admin UI (name + image dropdown + prompt), which manages the CRD for you.
+The router selects an agent per request by its prompt, so define one agent per
+capability (e.g. a `gcp-cost` agent on the gcloud image, a general `helper` agent).
+
+### The agent loop
+
+`claw-runner` runs a Claude tool-use loop (model `claude-opus-4-8`, adaptive
+thinking) with two tools:
+
+- **`bash`** — runs shell commands in the container (whatever the base image
+  provides: `gcloud`/`bq`, `aws`, `az`, `curl`, `python3`, …).
+- **`request_secret`** — requests *and* retrieves a credential on demand (DMs the
+  user an intake link, then installs the provided value into the pod and wires up
+  the env var / `gcloud auth`).
+
+Without an Anthropic key the runner falls back to a stub (still proves the
+materialize → respond path).
+
+### Secret authority
+
+Secrets are **not** Kubernetes Secrets or env vars. They live in the controller's
+store, encrypted with Tink. A workload receives a secret only when:
+
+1. A **grant** exists, bound to `agent + secret + image digest + spec hash + delivery hash`.
+2. The pod **attests** via `/login` (Kubernetes SA TokenReview → pod UID from the
+   bound token's claims, closing co-resident replay) and gets a scoped session token.
+3. `materialize` returns the decrypted value to `claw-bootstrap`, written to a
+   tmpfs volume — never to the model context or logs.
+
+Grants are durable (no leases); they're invalidated when the image digest or spec
+changes, or on explicit revoke. Approvals are PAM-style: configurable granters
+approve via Slack buttons, or the requesting user self-services via an intake link.
 
 ---
 
@@ -212,8 +215,10 @@ Served by the controller at **`/ui`** (port `8443`):
 
 - **Secrets** — metadata + **Rotate** (mints a one-time link to set a new value).
   Values are write-only — never viewable.
-- **Conversations** — the last 50 runs for audit (request + answer; no secret values).
-- **Agents** — base image, phase, declared secrets, and an inline **idle-timeout editor**.
+- **Conversations** — runs grouped into continuous threads for audit (request +
+  answer; no secret values).
+- **Agents** — **create and edit** agents (name + image dropdown + prompt), with an
+  inline **idle-timeout editor**.
 - **Images / Prompts / Channels** — the base-image registry, editable prompts, and
   the dynamic channel routing.
 
@@ -288,8 +293,8 @@ Code layout:
 
 MVP, actively developed. Working: the agent loop, secret authority + grants,
 on-demand `request_secret`, warm multi-turn sessions with history replay, the
-Slack connector (routing, onboarding, reactions), the LLM image router, the base-image
-registry, and the admin UI.
+Slack connector (routing, onboarding, reactions), the LLM agent router, the
+base-image registry, and the admin UI.
 
 **Not yet done / hardening:** API + UI auth and TLS; a non-SQLite store + KMS master
 key wired in; production deploy on GKE Autopilot (the target for the real cloud-cost

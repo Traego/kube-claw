@@ -80,6 +80,8 @@ type Tx interface {
 	GetSecret(namespace, name string) (Secret, error)
 	// ListSecrets returns all secret metadata (never values), for the admin UI.
 	ListSecrets() ([]Secret, error)
+	// DeleteSecret removes a secret and its versions, granters, and grants.
+	DeleteSecret(namespace, name string) error
 	// AddSecretVersion stores a new encrypted version.
 	AddSecretVersion(v SecretVersion) error
 	// LatestSecretVersion returns the newest version of a secret.

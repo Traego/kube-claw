@@ -105,9 +105,14 @@ func (s *Server) secretsPage(w http.ResponseWriter, r *http.Request) {
 <td class=mut>{{.Description}}</td>
 <td>{{range .Granters}}<code>{{.}}</code> {{end}}</td>
 <td class=mut>{{.CreatedAt}}</td>
-<td><form method=post action=/ui/secrets/rotate style=margin:0>
+<td style="display:flex;gap:.4rem">
+<form method=post action=/ui/secrets/rotate style=margin:0>
 <input type=hidden name=namespace value="{{.Namespace}}"><input type=hidden name=name value="{{.Name}}">
-<button>Rotate</button></form></td>
+<button>Rotate</button></form>
+<form method=post action=/ui/secrets/delete style=margin:0 onsubmit="return confirm('Delete secret {{.Name}}? This removes its value, grants, and history and cannot be undone.')">
+<input type=hidden name=namespace value="{{.Namespace}}"><input type=hidden name=name value="{{.Name}}">
+<button style="background:#c5221f;border-color:#c5221f">Delete</button></form>
+</td>
 </tr>{{else}}<tr><td colspan=7 class=mut>No secrets yet.</td></tr>{{end}}</table>`
 	s.renderDash(w, "secrets", "Secrets", body, secs)
 }
@@ -131,6 +136,28 @@ func (s *Server) rotateSecret(w http.ResponseWriter, r *http.Request) {
 <p><a class=link href="{{.D.Link}}">{{.D.Link}}</a></p>
 <p><a href=/ui/secrets>&larr; back to secrets</a></p>`
 	s.renderDash(w, "secrets", "Rotate "+name, body, map[string]string{"Name": name, "Link": link})
+}
+
+// deleteSecret removes a secret (and its versions/grants) from the UI.
+func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	ns, name := r.FormValue("namespace"), r.FormValue("name")
+	if ns == "" || name == "" {
+		writeErr(w, http.StatusBadRequest, "namespace and name required")
+		return
+	}
+	err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		if e := tx.DeleteSecret(ns, name); e != nil {
+			return e
+		}
+		return tx.AppendAudit(store.AuditEvent{Type: "secret.deleted", Actor: "ui",
+			Detail: map[string]any{"namespace": ns, "secret": name}})
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.Redirect(w, r, "/ui/secrets", http.StatusSeeOther)
 }
 
 func (s *Server) conversationsPage(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +222,7 @@ func (s *Server) agentsPage(w http.ResponseWriter, r *http.Request) {
 	body := `<p class=mut>Agents pair a prompt with an image. The router picks the best-fit agent per request (by its prompt). Idle timeout is how long the pod stays warm for follow-ups (editable inline).</p>
 <table><tr><th>Name</th><th>Base image</th><th>Phase</th><th>Idle (warm) timeout</th><th>Secrets</th><th>Prompt</th></tr>
 {{range .D.Agents.Items}}<tr>
-<td><code>{{.Name}}</code></td><td>{{.Spec.BaseImageRef}}</td>
+<td><code>{{.Name}}</code><br><a class=mut href="/ui/agents/edit?ns={{.Namespace}}&name={{.Name}}">edit</a></td><td>{{.Spec.BaseImageRef}}</td>
 <td><span class="pill {{.Status.Phase}}">{{.Status.Phase}}</span></td>
 <td><form method=post action=/ui/agents/idle style="margin:0;display:flex;gap:.3rem">
 <input type=hidden name=namespace value="{{.Namespace}}"><input type=hidden name=name value="{{.Name}}">
@@ -241,6 +268,68 @@ func (s *Server) uiCreateAgent(w http.ResponseWriter, r *http.Request) {
 		agent.Spec.Model = &clawv1alpha1.ModelSpec{SystemPrompt: prompt}
 	}
 	if err := s.K8s.Create(r.Context(), agent); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.Redirect(w, r, "/ui/agents", http.StatusSeeOther)
+}
+
+// agentEditPage renders an edit form for one agent (image dropdown pre-selected,
+// prompt pre-filled).
+func (s *Server) agentEditPage(w http.ResponseWriter, r *http.Request) {
+	ns := r.URL.Query().Get("ns")
+	if ns == "" {
+		ns = "claw-agents"
+	}
+	name := r.URL.Query().Get("name")
+	var agent clawv1alpha1.Agent
+	if err := s.Reader.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &agent); err != nil {
+		writeErr(w, http.StatusNotFound, "agent not found")
+		return
+	}
+	var imgs []store.BaseImage
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.ListBaseImages()
+		imgs = got
+		return e
+	})
+	prompt := ""
+	if agent.Spec.Model != nil {
+		prompt = agent.Spec.Model.SystemPrompt
+	}
+	body := `<form method=post action=/ui/agents/update style="background:#fff;border:1px solid var(--line);border-radius:8px;padding:1rem;max-width:640px">
+<input type=hidden name=namespace value="{{.D.NS}}"><input type=hidden name=name value="{{.D.Name}}">
+<p>Editing <code>{{.D.Name}}</code></p>
+<label>Image</label><br><select name=baseImageRef style="width:100%">
+{{range .D.Images}}<option value="{{.Name}}" {{if eq .Name $.D.Current}}selected{{end}}>{{.Name}} — {{.Description}}</option>{{end}}</select><br><br>
+<label>Prompt</label><br><textarea name=prompt style="width:100%;height:8rem;font:13px monospace">{{.D.Prompt}}</textarea><br><br>
+<button>Save</button> <a href=/ui/agents style="margin-left:.5rem">cancel</a>
+</form>`
+	s.renderDash(w, "agents", "Edit "+name, body,
+		map[string]any{"NS": ns, "Name": name, "Prompt": prompt, "Current": agent.Spec.BaseImageRef, "Images": imgs})
+}
+
+// agentUpdate applies an edit to an agent's image + prompt.
+func (s *Server) agentUpdate(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	ns := r.FormValue("namespace")
+	if ns == "" {
+		ns = "claw-agents"
+	}
+	name, base, prompt := r.FormValue("name"), r.FormValue("baseImageRef"), r.FormValue("prompt")
+	var agent clawv1alpha1.Agent
+	if err := s.K8s.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &agent); err != nil {
+		writeErr(w, http.StatusNotFound, "agent not found")
+		return
+	}
+	if base != "" {
+		agent.Spec.BaseImageRef = base
+	}
+	if agent.Spec.Model == nil {
+		agent.Spec.Model = &clawv1alpha1.ModelSpec{}
+	}
+	agent.Spec.Model.SystemPrompt = prompt
+	if err := s.K8s.Update(r.Context(), &agent); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
