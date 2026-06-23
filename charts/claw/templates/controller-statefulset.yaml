@@ -40,8 +40,15 @@ spec:
             - --ui-base-url={{ .Values.controller.uiBaseURL }}
             - --runner-image={{ .Values.controller.runnerImage }}
             - --self-url={{ .Values.controller.selfURL }}
-          {{- if or .Values.slack.routes .Values.slack.enabled }}
           env:
+            # Admin dashboard (/ui/*) basic-auth password (user "admin").
+            # Optional: if the secret/key is absent, the admin UI is unauthenticated.
+            - name: CLAW_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.controller.adminSecretName | default "claw-admin" }}
+                  key: password
+                  optional: true
             {{- with .Values.slack.routes }}
             - name: CLAW_SLACK_ROUTES
               value: {{ toJson . | quote }}
@@ -57,8 +64,8 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.slack.tokenSecretName }}
                   key: bot-token
-            # Anthropic key powers the LLM image router (classifies requests →
-            # picks the best base image). Optional; routing is skipped if absent.
+            # Anthropic key powers the LLM agent router (classifies requests →
+            # picks the best agent). Optional; routing is skipped if absent.
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -66,7 +73,6 @@ spec:
                   key: api-key
                   optional: true
             {{- end }}
-          {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.service.apiPort }}

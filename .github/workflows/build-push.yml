@@ -38,6 +38,8 @@ jobs:
             dockerfile: Dockerfile
           - name: runner
             dockerfile: Dockerfile.runner
+          - name: runner-bash
+            dockerfile: Dockerfile.runner-bash
           - name: gcloud
             dockerfile: images/gcloud/Dockerfile
     steps:

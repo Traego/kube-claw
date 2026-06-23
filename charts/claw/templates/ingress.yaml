@@ -29,6 +29,19 @@ spec:
     requestPath: {{ $hcPath | quote }}
     port: {{ .Values.service.uiPort }}
 ---
+# Health check for the admin-UI backend (the API listener serves /healthz).
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: claw-api-bc
+  labels:
+    app.kubernetes.io/name: claw-controller
+spec:
+  healthCheck:
+    type: HTTP
+    requestPath: /healthz
+    port: {{ .Values.service.apiPort }}
+---
 {{- end }}
 # Secret-intake UI only (DESIGN.md §8.3). Exposes ONLY /ui/secret-intake/* —
 # never /v1/*. The page is served by a separate listener in the controller.
@@ -59,6 +72,7 @@ spec:
     - host: {{ .Values.ui.ingress.host | quote }}
       http:
         paths:
+          # Public, one-time-token-gated intake UI (separate listener).
           - path: /ui/secret-intake
             pathType: Prefix
             backend:
@@ -66,4 +80,16 @@ spec:
                 name: claw-controller
                 port:
                   number: {{ .Values.service.uiPort }}
+          {{- if .Values.ui.ingress.adminUI }}
+          # Admin dashboard (basic-auth gated by CLAW_ADMIN_PASSWORD). Longest-
+          # prefix routing sends /ui/secret-intake to the UI listener above and
+          # everything else under /ui to the API listener. /v1/* is NOT exposed.
+          - path: /ui
+            pathType: Prefix
+            backend:
+              service:
+                name: claw-controller
+                port:
+                  number: {{ .Values.service.apiPort }}
+          {{- end }}
 {{- end }}

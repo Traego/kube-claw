@@ -14,6 +14,7 @@ package apihttp
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -46,6 +47,10 @@ type Server struct {
 	Approvals *approvals.Service    // shared approval path
 	Router    *slackrouter.Router   // connector routing (nil if no routes configured)
 	Notifier  *slackrouter.Notifier // posts replies/approvals to Slack (nil if no bot token)
+	// AdminPassword gates the admin dashboard (/ui/*) with HTTP basic auth
+	// (user "admin"). Empty = no auth (local/dev). The secret-intake UI runs on a
+	// separate listener and is never gated here (it's one-time-token protected).
+	AdminPassword string
 }
 
 // NeedLeaderElection lets the API run on every replica (false = not gated).
@@ -125,7 +130,24 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /ui/agents/edit", s.agentEditPage)
 	mux.HandleFunc("POST /ui/agents/update", s.agentUpdate)
 	mux.HandleFunc("GET /ui/channels", s.channelsPage)
-	return mux
+	return s.withAdminAuth(mux)
+}
+
+// withAdminAuth gates every /ui/* admin route with HTTP basic auth when an admin
+// password is configured. /v1/*, /healthz, etc. are unaffected; the secret-intake
+// UI is a separate listener and never reaches this handler.
+func (s *Server) withAdminAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.AdminPassword != "" && strings.HasPrefix(r.URL.Path, "/ui") {
+			u, p, ok := r.BasicAuth()
+			if !ok || u != "admin" || subtle.ConstantTimeCompare([]byte(p), []byte(s.AdminPassword)) != 1 {
+				w.Header().Set("WWW-Authenticate", `Basic realm="kube-claw admin"`)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 type agentView struct {

@@ -18,6 +18,10 @@ controller:
   runnerImage: REGION-docker.pkg.dev/PROJECT/REPO/claw-runner:TAG
   # Public HTTPS URL of the intake UI (the Ingress host) — used in secret links.
   uiBaseURL: https://claw.example.com
+  # Admin dashboard basic-auth password is read from this secret (key "password").
+  # Create it out-of-band: kubectl -n claw-system create secret generic claw-admin
+  #   --from-literal=password=...   (or via scripts from .secrets.env)
+  adminSecretName: claw-admin
   resources:
     requests:
       cpu: 250m
@@ -41,6 +45,7 @@ ui:
     enabled: true
     host: claw.example.com
     className: "gce"
+    adminUI: true           # also expose the admin dashboard (/ui) — basic-auth gated
     gke:
       managedCert: true     # Google-managed TLS cert (auto-provision + renew)
       staticIpName: claw-ui # `gcloud compute addresses create claw-ui --global`

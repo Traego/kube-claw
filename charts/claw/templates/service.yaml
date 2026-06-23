@@ -7,9 +7,9 @@ metadata:
   {{- if and .Values.ui.ingress.enabled .Values.ui.ingress.gke }}
   {{- if .Values.ui.ingress.gke.managedCert }}
   annotations:
-    # Apply the intake health check (BackendConfig) to the ui port so the GKE
-    # Ingress LB health-checks /ui/secret-intake/* instead of "/".
-    cloud.google.com/backend-config: '{"ports": {"ui": "claw-ui-bc"}}'
+    # Per-port health checks (BackendConfig) for the GKE Ingress LB: the ui port
+    # checks /ui/secret-intake/*, the api port checks /healthz — instead of "/".
+    cloud.google.com/backend-config: '{"ports": {"ui": "claw-ui-bc"{{ if .Values.ui.ingress.adminUI }}, "api": "claw-api-bc"{{ end }}}}'
   {{- end }}
   {{- end }}
 spec:

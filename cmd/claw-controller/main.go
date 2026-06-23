@@ -167,9 +167,10 @@ func main() {
 		UIBase:    uiBaseURL,
 		Identity:  idProvider,
 		Signer:    signer,
-		Approvals: approvalSvc,
-		Router:    slackRt,
-		Notifier:  slackNotifier,
+		Approvals:     approvalSvc,
+		Router:        slackRt,
+		Notifier:      slackNotifier,
+		AdminPassword: os.Getenv("CLAW_ADMIN_PASSWORD"),
 	}); err != nil {
 		log.Error(err, "unable to add HTTP API server")
 		os.Exit(1)
