@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -26,7 +27,13 @@ type agentSession struct {
 	controllerURL string
 	token         string // CLAW_TOKEN, for on-demand secret requests
 	runID         string
+
+	mu   sync.Mutex // guards step
+	step string     // the agent's current narrated step, surfaced by the heartbeat
 }
+
+func (s *agentSession) setStep(t string) { s.mu.Lock(); s.step = t; s.mu.Unlock() }
+func (s *agentSession) getStep() string  { s.mu.Lock(); defer s.mu.Unlock(); return s.step }
 
 func newAgentSession(systemPrompt string) *agentSession {
 	sys := strings.TrimSpace(systemPrompt)
@@ -169,9 +176,16 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 	s.messages = append(s.messages, anthropic.NewUserMessage(anthropic.NewTextBlock(userText)))
 	adaptive := anthropic.ThinkingConfigAdaptiveParam{}
 
+	// Heartbeat: for turns that run long, post in-thread progress (~every 60s)
+	// describing the agent's current step, so a slow operation isn't silent.
+	s.setStep("")
+	hbCtx, stopHB := context.WithCancel(ctx)
+	defer stopHB()
+	go s.heartbeat(hbCtx)
+
 	var final []string
 	for i := 0; i < 12; i++ { // bound the agentic loop per turn
-		resp, err := s.client.Messages.New(ctx, anthropic.MessageNewParams{
+		resp, err := s.callModel(ctx, anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeOpus4_8,
 			MaxTokens: 4096,
 			System:    []anthropic.TextBlockParam{{Text: s.sys}},
@@ -191,6 +205,7 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 			case anthropic.TextBlock:
 				if t := strings.TrimSpace(v.Text); t != "" {
 					turn = append(turn, t)
+					s.setStep(t) // newest narration = what the heartbeat reports
 				}
 			case anthropic.ToolUseBlock:
 				raw := []byte(v.JSON.Input.Raw())
@@ -228,6 +243,93 @@ func (s *agentSession) turn(ctx context.Context, userText string) (string, error
 		return "", fmt.Errorf("agent produced no text answer")
 	}
 	return answer, nil
+}
+
+// callModel calls Claude with visible retry-with-backoff: on a (usually transient,
+// e.g. network/DNS) failure it posts "…retrying in Xs…" to the thread and waits,
+// up to a few attempts, before giving up so the caller can report a clean failure.
+func (s *agentSession) callModel(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	backoffs := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		resp, err := s.client.Messages.New(ctx, params)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		fmt.Fprintf(os.Stderr, "claw-runner: model call attempt %d failed: %v\n", attempt+1, err)
+		if attempt >= len(backoffs) {
+			return nil, lastErr
+		}
+		wait := backoffs[attempt]
+		s.postProgress(ctx, fmt.Sprintf("⚠️ That request to the model failed (%s) — retrying in %ds… (attempt %d of %d)",
+			shortErr(err), int(wait.Seconds()), attempt+2, len(backoffs)+1))
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+// shortErr maps a raw error to a short, human phrase for status messages.
+func shortErr(err error) string {
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "no such host"), strings.Contains(s, "dial tcp"), strings.Contains(s, "lookup "):
+		return "network/DNS issue"
+	case strings.Contains(s, "deadline"), strings.Contains(s, "timeout"):
+		return "timeout"
+	case strings.Contains(s, "connection refused"), strings.Contains(s, "connection reset"):
+		return "connection dropped"
+	case strings.Contains(s, "429"), strings.Contains(s, "rate"), strings.Contains(s, "overloaded"), strings.Contains(s, "529"):
+		return "rate-limited/overloaded"
+	default:
+		return "temporary error"
+	}
+}
+
+// heartbeat posts an in-thread progress update roughly every 60s while a turn
+// runs long, so slow operations report what they're doing instead of going
+// silent. The first post is at ~60s, so quick turns stay clean.
+func (s *agentSession) heartbeat(ctx context.Context) {
+	if s.controllerURL == "" || s.runID == "" {
+		return
+	}
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			msg := "⏳ Still working on it…"
+			if step := s.getStep(); step != "" {
+				if len(step) > 280 {
+					step = step[:280] + "…"
+				}
+				msg = "⏳ " + step
+			}
+			s.postProgress(ctx, msg)
+		}
+	}
+}
+
+// postProgress sends an intermediate, in-thread status message (best-effort).
+func (s *agentSession) postProgress(ctx context.Context, text string) {
+	body, _ := json.Marshal(map[string]string{"text": text})
+	url := fmt.Sprintf("%s/v1/runs/%s/progress", s.controllerURL, s.runID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+	if resp, e := http.DefaultClient.Do(req); e == nil {
+		resp.Body.Close()
+	}
 }
 
 // requestSecret asks the controller to collect a credential on demand: it DMs

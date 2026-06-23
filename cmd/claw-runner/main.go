@@ -67,17 +67,36 @@ func main() {
 	warmLoop(sess, controllerURL, sessionID)
 }
 
-// turn runs one message to an answer string (errors become a visible reply).
+// turn runs one message to an answer string (errors become a clear, visible
+// reply). The runner retries transient failures internally (with in-thread
+// "retrying…" messages); this is the final, humanized message once it gives up.
 func turn(sess *agentSession, runID, input string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	ans, err := sess.turn(ctx, input)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "claw-runner: agent turn failed: %v\n", err)
-		return "Agent error: " + err.Error()
+		return humanizeErr(err)
 	}
 	fmt.Printf("claw-runner: run=%s input=%q -> %q\n", runID, input, ans)
 	return ans
+}
+
+// humanizeErr turns a raw failure into a clear message for the user.
+func humanizeErr(err error) string {
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "no such host"), strings.Contains(s, "dial tcp"),
+		strings.Contains(s, "lookup "), strings.Contains(s, "connection refused"),
+		strings.Contains(s, "connection reset"):
+		return "⚠️ I kept losing my connection to the model (a network/DNS problem) and couldn't finish, even after retrying. It looks transient — please ask again in a moment."
+	case strings.Contains(s, "deadline"), strings.Contains(s, "timeout"), strings.Contains(s, "context canceled"):
+		return "⚠️ That took too long and I had to stop before finishing. Please try again, or narrow the request."
+	case strings.Contains(s, "rate"), strings.Contains(s, "429"), strings.Contains(s, "overloaded"), strings.Contains(s, "529"):
+		return "⚠️ The model is rate-limited/overloaded right now and I couldn't complete that after retrying. Please try again shortly."
+	default:
+		return "⚠️ I ran into an error and couldn't complete that: " + firstLine([]byte(err.Error()))
+	}
 }
 
 // warmLoop keeps the pod alive, claiming follow-up turns for this Slack thread

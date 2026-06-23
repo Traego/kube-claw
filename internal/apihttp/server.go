@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -81,6 +82,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /v1/runs/{id}/outputs", s.postOutput)
+	mux.HandleFunc("POST /v1/runs/{id}/progress", s.postProgress)
 	mux.HandleFunc("POST /v1/secrets", s.createSecret)
 	mux.HandleFunc("GET /v1/secrets/{name}/metadata", s.secretMetadata)
 	mux.HandleFunc("PUT /v1/secrets/{name}/versions", s.putSecretVersion)
@@ -250,6 +252,36 @@ type postOutputReq struct {
 // postOutput records a runner's output and marks the run Succeeded. This is the
 // runner→controller callback (DESIGN.md §36). Auth (claw session token) lands in
 // Phase 5; for now it is unauthenticated on the cluster-internal API.
+// postProgress posts an intermediate, in-thread status update for a running turn
+// (no output recorded, run not completed) so long operations report progress.
+func (s *Server) postProgress(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Text) == "" {
+		writeErr(w, http.StatusBadRequest, "text required")
+		return
+	}
+	var run store.Run
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetRun(id)
+		run = got
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if s.Notifier != nil {
+		if ch := slackrouter.SlackChannel(run.Source); ch != "" {
+			if e := s.Notifier.PostReply(r.Context(), ch, run.SessionID, req.Text); e != nil {
+				logf.Log.WithName("apihttp").Error(e, "post slack progress", "run", id)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "posted"})
+}
+
 func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req postOutputReq
