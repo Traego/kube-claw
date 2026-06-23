@@ -1,0 +1,69 @@
+name: build-push
+
+# Build + push the kube-claw images to Artifact Registry.
+#
+# Triggers only when the image build inputs change (the Dockerfiles AND the Go
+# source/modules they compile in — a Dockerfile-only filter would ship stale
+# images when runner/controller code changes), plus manual dispatch.
+#
+# Auth: a GCP service-account key stored as the repo secret GCP_SA_KEY
+#   (claw-ci@traego-infra.iam.gserviceaccount.com, roles/artifactregistry.writer).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "Dockerfile.runner"
+      - "images/**"
+      - "cmd/**"
+      - "internal/**"
+      - "api/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/build-push.yml"
+
+env:
+  PROJECT: traego-infra
+  REGION: us-central1
+  REPO: claw
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest # amd64-native — no cross-build/emulation
+    strategy:
+      matrix:
+        include:
+          - name: controller
+            dockerfile: Dockerfile
+          - name: runner
+            dockerfile: Dockerfile.runner
+          - name: gcloud
+            dockerfile: images/gcloud/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build + push claw-${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT }}/${{ env.REPO }}/claw-${{ matrix.name }}:${{ github.sha }}
+            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT }}/${{ env.REPO }}/claw-${{ matrix.name }}:latest
+          cache-from: type=gha,scope=claw-${{ matrix.name }}
+          cache-to: type=gha,scope=claw-${{ matrix.name }},mode=max
