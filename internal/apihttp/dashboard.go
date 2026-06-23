@@ -49,7 +49,9 @@ button{font:inherit;padding:.3rem .7rem;border:1px solid var(--accent);backgroun
 <nav><span class=brand>🦞 kube-claw</span>
 <a href=/ui/dashboard class="{{if eq .Active "dashboard"}}on{{end}}">Dashboard</a>
 <a href=/ui/secrets class="{{if eq .Active "secrets"}}on{{end}}">Secrets</a>
+<a href=/ui/requests class="{{if eq .Active "requests"}}on{{end}}">Requests</a>
 <a href=/ui/conversations class="{{if eq .Active "conversations"}}on{{end}}">Conversations</a>
+<a href=/ui/audit class="{{if eq .Active "audit"}}on{{end}}">Audit</a>
 <a href=/ui/agents class="{{if eq .Active "agents"}}on{{end}}">Agents</a>
 <a href=/ui/base-images class="{{if eq .Active "images"}}on{{end}}">Images</a>
 <a href=/ui/prompts class="{{if eq .Active "prompts"}}on{{end}}">Prompts</a>
@@ -158,6 +160,92 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/ui/secrets", http.StatusSeeOther)
+}
+
+// requestsPage lists pending on-demand access requests with the agent's reason
+// ("why") and who it's for, plus Approve/Deny (break-glass: the authenticated UI
+// operator is trusted, so it bypasses the Slack granter check).
+func (s *Server) requestsPage(w http.ResponseWriter, r *http.Request) {
+	type reqRow struct {
+		store.SecretRequest
+		SecretName string
+	}
+	var rows []reqRow
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		reqs, e := tx.ListSecretRequests("Pending")
+		if e != nil {
+			return e
+		}
+		for _, rq := range reqs {
+			name := rq.SecretName
+			if name == "" {
+				if sec, e := tx.GetSecret(rq.AgentNamespace, rq.SecretName); e == nil {
+					name = sec.Name
+				}
+			}
+			rows = append(rows, reqRow{SecretRequest: rq, SecretName: name})
+		}
+		return nil
+	})
+	body := `<p class=mut>Pending credential access requests. The agent's reason and who it's for are shown so you can make an informed call. Approving here is break-glass (it bypasses the Slack granter check) and is audited.</p>
+<table><tr><th>When</th><th>Agent</th><th>Secret</th><th>For (who)</th><th>Reason (why)</th><th></th></tr>
+{{range .D}}<tr>
+<td class=mut>{{.CreatedAt}}</td><td><code>{{.AgentName}}</code></td><td><code>{{.SecretName}}</code></td>
+<td>{{if .RequestedBy}}{{.RequestedBy}}{{else}}<span class=mut>—</span>{{end}}</td>
+<td>{{if .Context}}{{.Context}}{{else}}<span class=mut>(none)</span>{{end}}</td>
+<td style="display:flex;gap:.4rem">
+<form method=post action=/ui/requests/approve style=margin:0><input type=hidden name=id value="{{.ID}}"><button>Approve</button></form>
+<form method=post action=/ui/requests/deny style=margin:0><input type=hidden name=id value="{{.ID}}"><button style="background:#c5221f;border-color:#c5221f">Deny</button></form>
+</td>
+</tr>{{else}}<tr><td colspan=6 class=mut>No pending requests.</td></tr>{{end}}</table>`
+	s.renderDash(w, "requests", "Access requests", body, rows)
+}
+
+// uiApproveRequest approves a pending request from the dashboard (break-glass).
+func (s *Server) uiApproveRequest(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	id := r.FormValue("id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "id required")
+		return
+	}
+	if _, err := s.Approvals.Approve(r.Context(), id, "ui", "approved via dashboard"); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.Redirect(w, r, "/ui/requests", http.StatusSeeOther)
+}
+
+// uiDenyRequest denies a pending request from the dashboard.
+func (s *Server) uiDenyRequest(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	id := r.FormValue("id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "id required")
+		return
+	}
+	if err := s.Approvals.Deny(r.Context(), id, "ui", "denied via dashboard"); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	http.Redirect(w, r, "/ui/requests", http.StatusSeeOther)
+}
+
+// auditPage shows the recent hash-chained audit log (value-free).
+func (s *Server) auditPage(w http.ResponseWriter, r *http.Request) {
+	var rows []store.AuditRecord
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.ListAudit(200)
+		rows = got
+		return e
+	})
+	body := `<p class=mut>The most recent 200 audit events — append-only and hash-chained (tamper-evident). Secret values never appear here.</p>
+<table><tr><th>When</th><th>Event</th><th>Actor</th><th>Detail</th></tr>
+{{range .D}}<tr>
+<td class=mut>{{.TS}}</td><td><code>{{.Type}}</code></td><td>{{.Actor}}</td>
+<td class=mut><span class=snip>{{.Detail}}</span></td>
+</tr>{{else}}<tr><td colspan=4 class=mut>No audit events yet.</td></tr>{{end}}</table>`
+	s.renderDash(w, "audit", "Audit log", body, rows)
 }
 
 func (s *Server) conversationsPage(w http.ResponseWriter, r *http.Request) {

@@ -43,6 +43,8 @@ type Store interface {
 type Tx interface {
 	// AppendAudit writes a hash-chained, tamper-evident audit row.
 	AppendAudit(ev AuditEvent) error
+	// ListAudit returns the most recent audit rows, newest first (for the UI).
+	ListAudit(limit int) ([]AuditRecord, error)
 
 	// CreateRun inserts a new run.
 	CreateRun(r Run) error
@@ -184,6 +186,18 @@ type AuditEvent struct {
 	SecretID string         // optional
 	Actor    string         // optional
 	Detail   map[string]any // optional structured detail (never secret values)
+}
+
+// AuditRecord is a stored audit row read back for display (the value-free,
+// hash-chained log). Detail is the raw JSON detail string.
+type AuditRecord struct {
+	TS       string `json:"ts"`
+	Type     string `json:"type"`
+	RunID    string `json:"runId,omitempty"`
+	GrantID  string `json:"grantId,omitempty"`
+	SecretID string `json:"secretId,omitempty"`
+	Actor    string `json:"actor,omitempty"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 // Run is the unit of work and audit visibility (DESIGN.md §22). Source/Input are

@@ -101,6 +101,32 @@ func (t *tx) AppendAudit(ev store.AuditEvent) error {
 	return nil
 }
 
+// ListAudit returns the most recent audit rows, newest first.
+func (t *tx) ListAudit(limit int) ([]store.AuditRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := t.tx.Query(
+		`SELECT ts, type, run_id, grant_id, secret_id, actor, detail
+		 FROM audit ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.AuditRecord
+	for rows.Next() {
+		var a store.AuditRecord
+		var runID, grantID, secretID, actor, detail sql.NullString
+		if err := rows.Scan(&a.TS, &a.Type, &runID, &grantID, &secretID, &actor, &detail); err != nil {
+			return nil, err
+		}
+		a.RunID, a.GrantID, a.SecretID = runID.String, grantID.String, secretID.String
+		a.Actor, a.Detail = actor.String, detail.String
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // CreateRun inserts a new run row.
 func (t *tx) CreateRun(r store.Run) error {
 	if r.CreatedAt == "" {
