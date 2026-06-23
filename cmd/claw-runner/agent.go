@@ -90,6 +90,41 @@ func newAgentSession(systemPrompt string) *agentSession {
 	}
 }
 
+// loadAvailableSecrets appends the secrets the agent can request/retrieve (names
+// + descriptions, never values) to the system prompt, so it uses an existing key
+// by name instead of asking the user for a new one.
+func (s *agentSession) loadAvailableSecrets(ctx context.Context) {
+	if s.controllerURL == "" || s.runID == "" || s.token == "" {
+		return
+	}
+	url := fmt.Sprintf("%s/v1/runs/%s/available-secrets", s.controllerURL, s.runID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+	var out struct {
+		Secrets []struct{ Name, Description string }
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil || len(out.Secrets) == 0 {
+		return
+	}
+	var b strings.Builder
+	b.WriteString("\n\nCredentials already registered and available to you — call request_secret with the EXACT name to install and use one (if the value was already provided, it installs instantly with no user prompt):\n")
+	for _, sc := range out.Secrets {
+		fmt.Fprintf(&b, "- %s: %s\n", sc.Name, sc.Description)
+	}
+	s.sys += b.String()
+}
+
 // loadHistory seeds the session with the thread's prior turns from the controller
 // so a cold-start pod (warm pod idled out) still remembers the conversation. A
 // no-op for a brand-new thread. Called once at pod start, before the first turn.

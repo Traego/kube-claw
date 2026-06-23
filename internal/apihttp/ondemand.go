@@ -52,6 +52,44 @@ func (s *Server) sessionHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"turns": turns})
 }
 
+// availableSecrets lists the secret names + descriptions (never values) in the
+// run's namespace, so the agent knows what credentials it can request/retrieve by
+// name instead of guessing. Token-scoped to the run.
+func (s *Server) availableSecrets(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("id")
+	if claims, err := s.Signer.Verify(bearer(r)); err != nil || claims.RunID != runID {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
+	var run store.Run
+	if err := s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		got, e := tx.GetRun(runID)
+		run = got
+		return e
+	}); err != nil {
+		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	}
+	type sec struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	out := []sec{}
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		all, e := tx.ListSecrets()
+		if e != nil {
+			return e
+		}
+		for _, x := range all {
+			if x.Namespace == run.AgentNamespace {
+				out = append(out, sec{Name: x.Name, Description: x.Description})
+			}
+		}
+		return nil
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"secrets": out})
+}
+
 // requestSecretReq is what the agent's request_secret tool sends.
 type requestSecretReq struct {
 	Name        string `json:"name"`

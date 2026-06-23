@@ -49,6 +49,10 @@ func main() {
 		sess.loadHistory(hctx, sid)
 		hcancel()
 	}
+	// Tell the agent which credentials are already registered (names only).
+	actx, acancel := context.WithTimeout(context.Background(), 15*time.Second)
+	sess.loadAvailableSecrets(actx)
+	acancel()
 	answer := turn(sess, runID, input)
 	if err := postOutput(controllerURL, runID, answer); err != nil {
 		fmt.Fprintf(os.Stderr, "claw-runner: posting output: %v\n", err)

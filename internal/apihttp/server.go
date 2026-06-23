@@ -97,6 +97,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /ui/base-images", s.baseImagesSubmit)
 	mux.HandleFunc("POST /v1/connectors/slack/events", s.slackEvent)
 	mux.HandleFunc("GET /v1/sessions/{id}/history", s.sessionHistory)
+	mux.HandleFunc("GET /v1/runs/{id}/available-secrets", s.availableSecrets)
 	mux.HandleFunc("POST /v1/runs/{id}/request-secret", s.requestSecret)
 	mux.HandleFunc("GET /v1/runs/{id}/requested-secret", s.requestedSecret)
 	mux.HandleFunc("POST /v1/sessions/{id}/claim-next", s.claimNextTurn)
