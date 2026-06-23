@@ -1,4 +1,35 @@
 {{- if .Values.ui.ingress.enabled }}
+{{- $gke := .Values.ui.ingress.gke | default dict }}
+{{- $hcPath := "/ui/secret-intake/healthz" }}
+{{- if $gke.managedCert }}
+# Google-managed TLS cert for the intake host (auto-provisions once DNS resolves,
+# auto-renews). Used instead of a cert-manager tls secret on GKE.
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: claw-ui-cert
+  labels:
+    app.kubernetes.io/name: claw-controller
+spec:
+  domains:
+    - {{ .Values.ui.ingress.host | quote }}
+---
+# The intake listener only serves /ui/secret-intake/* — the LB's default "/"
+# health check would mark the backend unhealthy (502). Point it at the GET form
+# (which renders 200 for any token), so the backend stays healthy.
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: claw-ui-bc
+  labels:
+    app.kubernetes.io/name: claw-controller
+spec:
+  healthCheck:
+    type: HTTP
+    requestPath: {{ $hcPath | quote }}
+    port: {{ .Values.service.uiPort }}
+---
+{{- end }}
 # Secret-intake UI only (DESIGN.md §8.3). Exposes ONLY /ui/secret-intake/* —
 # never /v1/*. The page is served by a separate listener in the controller.
 apiVersion: networking.k8s.io/v1
@@ -7,6 +38,13 @@ metadata:
   name: claw-ui-intake
   labels:
     app.kubernetes.io/name: claw-controller
+  annotations:
+    {{- with $gke.staticIpName }}
+    kubernetes.io/ingress.global-static-ip-name: {{ . | quote }}
+    {{- end }}
+    {{- if $gke.managedCert }}
+    networking.gke.io/managed-certificates: claw-ui-cert
+    {{- end }}
 spec:
   {{- with .Values.ui.ingress.className }}
   ingressClassName: {{ . }}

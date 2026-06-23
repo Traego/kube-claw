@@ -34,13 +34,18 @@ controller:
     storageClassName: premium-rwo
 
 # Expose ONLY /ui/secret-intake/* over HTTPS via a GKE Ingress + managed cert.
+# Set the host via --set ui.ingress.host=HOST and point HOST's DNS A record at
+# the reserved global static IP named below.
 ui:
   ingress:
     enabled: true
     host: claw.example.com
     className: "gce"
+    gke:
+      managedCert: true     # Google-managed TLS cert (auto-provision + renew)
+      staticIpName: claw-ui # `gcloud compute addresses create claw-ui --global`
     tls:
-      enabled: true
+      enabled: false        # using the GKE managed cert, not a cert-manager secret
       secretName: claw-ui-tls
 
 # Enable after creating the claw-slack-tokens Secret (see scripts/deploy-secrets.sh).

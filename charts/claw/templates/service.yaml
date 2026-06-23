@@ -4,6 +4,14 @@ metadata:
   name: claw-controller
   labels:
     app.kubernetes.io/name: claw-controller
+  {{- if and .Values.ui.ingress.enabled .Values.ui.ingress.gke }}
+  {{- if .Values.ui.ingress.gke.managedCert }}
+  annotations:
+    # Apply the intake health check (BackendConfig) to the ui port so the GKE
+    # Ingress LB health-checks /ui/secret-intake/* instead of "/".
+    cloud.google.com/backend-config: '{"ports": {"ui": "claw-ui-bc"}}'
+  {{- end }}
+  {{- end }}
 spec:
   selector:
     app.kubernetes.io/name: claw-controller
