@@ -105,6 +105,13 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/prompts/{ns}/{name}", s.getPrompt)
 	mux.HandleFunc("GET /ui/prompts", s.promptsPage)
 	mux.HandleFunc("POST /ui/prompts", s.promptsSubmit)
+	mux.HandleFunc("GET /ui", s.dashboardHome)
+	mux.HandleFunc("GET /ui/dashboard", s.dashboardHome)
+	mux.HandleFunc("GET /ui/secrets", s.secretsPage)
+	mux.HandleFunc("POST /ui/secrets/rotate", s.rotateSecret)
+	mux.HandleFunc("GET /ui/conversations", s.conversationsPage)
+	mux.HandleFunc("GET /ui/agents", s.agentsPage)
+	mux.HandleFunc("GET /ui/channels", s.channelsPage)
 	return mux
 }
 

@@ -60,6 +60,45 @@ func (t *tx) GetSecret(namespace, name string) (store.Secret, error) {
 	return s, rows.Err()
 }
 
+// ListSecrets returns all secret metadata (no values) with granters.
+func (t *tx) ListSecrets() ([]store.Secret, error) {
+	rows, err := t.tx.Query(`SELECT id, namespace, name, type, description, created_at FROM secrets ORDER BY namespace, name`)
+	if err != nil {
+		return nil, err
+	}
+	var out []store.Secret
+	for rows.Next() {
+		var s store.Secret
+		var typ, desc sql.NullString
+		if err := rows.Scan(&s.ID, &s.Namespace, &s.Name, &typ, &desc, &s.CreatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		s.Type, s.Description = typ.String, desc.String
+		out = append(out, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out { // load granters per secret (small N)
+		grows, err := t.tx.Query(`SELECT principal FROM secret_granters WHERE secret_id=?`, out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		for grows.Next() {
+			var p string
+			if err := grows.Scan(&p); err != nil {
+				grows.Close()
+				return nil, err
+			}
+			out[i].Granters = append(out[i].Granters, p)
+		}
+		grows.Close()
+	}
+	return out, nil
+}
+
 // AddSecretVersion stores a new encrypted version.
 func (t *tx) AddSecretVersion(v store.SecretVersion) error {
 	if v.CreatedAt == "" {

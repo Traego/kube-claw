@@ -78,6 +78,8 @@ type Tx interface {
 	CreateSecret(s Secret) error
 	// GetSecret returns secret metadata (incl. granters) by namespace/name.
 	GetSecret(namespace, name string) (Secret, error)
+	// ListSecrets returns all secret metadata (never values), for the admin UI.
+	ListSecrets() ([]Secret, error)
 	// AddSecretVersion stores a new encrypted version.
 	AddSecretVersion(v SecretVersion) error
 	// LatestSecretVersion returns the newest version of a secret.
