@@ -51,6 +51,9 @@ type Server struct {
 	// (user "admin"). Empty = no auth (local/dev). The secret-intake UI runs on a
 	// separate listener and is never gated here (it's one-time-token protected).
 	AdminPassword string
+	// EnableFakeSlackEvents registers the test-only POST /v1/connectors/slack/events
+	// endpoint. Off in prod so callers can't simulate Slack-triggered runs.
+	EnableFakeSlackEvents bool
 }
 
 // NeedLeaderElection lets the API run on every replica (false = not gated).
@@ -102,7 +105,11 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/base-images", s.listBaseImages)
 	mux.HandleFunc("GET /ui/base-images", s.baseImagesPage)
 	mux.HandleFunc("POST /ui/base-images", s.baseImagesSubmit)
-	mux.HandleFunc("POST /v1/connectors/slack/events", s.slackEvent)
+	// Fake Slack event endpoint — simulates a Slack-triggered run without the
+	// Slack transport. Test-only; off unless explicitly enabled (CLAW_ENABLE_FAKE_SLACK).
+	if s.EnableFakeSlackEvents {
+		mux.HandleFunc("POST /v1/connectors/slack/events", s.slackEvent)
+	}
 	mux.HandleFunc("GET /v1/sessions/{id}/history", s.sessionHistory)
 	mux.HandleFunc("GET /v1/runs/{id}/available-secrets", s.availableSecrets)
 	mux.HandleFunc("POST /v1/runs/{id}/request-secret", s.requestSecret)
@@ -131,6 +138,52 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /ui/agents/update", s.agentUpdate)
 	mux.HandleFunc("GET /ui/channels", s.channelsPage)
 	return s.withAdminAuth(mux)
+}
+
+// authRunInSession verifies the caller's run session token and that runID is the
+// token's run OR a run in the same session (warm-session pods reuse one token
+// across follow-up turns). Used to authenticate runner callbacks.
+func (s *Server) authRunInSession(r *http.Request, runID string) bool {
+	claims, err := s.Signer.Verify(bearer(r))
+	if err != nil {
+		return false
+	}
+	if claims.RunID == runID {
+		return true
+	}
+	ok := false
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		caller, e := tx.GetRun(claims.RunID)
+		if e != nil {
+			return nil
+		}
+		target, e := tx.GetRun(runID)
+		if e != nil {
+			return nil
+		}
+		if caller.SessionID != "" && caller.SessionID == target.SessionID {
+			ok = true
+		}
+		return nil
+	})
+	return ok
+}
+
+// authSession verifies the caller's token belongs to a run in the given session.
+func (s *Server) authSession(r *http.Request, sessionID string) bool {
+	claims, err := s.Signer.Verify(bearer(r))
+	if err != nil {
+		return false
+	}
+	ok := false
+	_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {
+		caller, e := tx.GetRun(claims.RunID)
+		if e == nil && caller.SessionID == sessionID {
+			ok = true
+		}
+		return nil
+	})
+	return ok
 }
 
 // withAdminAuth gates every /ui/* admin route with HTTP basic auth when an admin
@@ -278,6 +331,10 @@ type postOutputReq struct {
 // (no output recorded, run not completed) so long operations report progress.
 func (s *Server) postProgress(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !s.authRunInSession(r, id) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
 	var req struct {
 		Text string `json:"text"`
 	}
@@ -306,6 +363,10 @@ func (s *Server) postProgress(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) postOutput(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !s.authRunInSession(r, id) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
 	var req postOutputReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")

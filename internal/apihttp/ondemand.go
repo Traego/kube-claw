@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -103,6 +104,20 @@ type requestSecretReq struct {
 	Reason      string `json:"reason"` // the agent's justification ("why"), shown to approvers
 }
 
+// validSecretName allows only safe characters so a name can't be used for path
+// traversal when it's interpolated into the secret file path.
+func validSecretName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return name != "." && name != ".." && !strings.Contains(name, "..")
+}
+
 // agentBinding loads an agent's current grant binding (digest + spec hash).
 func (s *Server) agentBinding(ctx context.Context, ns, name string) (digest, specHash string) {
 	var a clawv1alpha1.Agent
@@ -127,6 +142,10 @@ func (s *Server) requestSecret(w http.ResponseWriter, r *http.Request) {
 	var req requestSecretReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		writeErr(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if !validSecretName(req.Name) {
+		writeErr(w, http.StatusBadRequest, "invalid secret name")
 		return
 	}
 	var run store.Run
@@ -246,8 +265,8 @@ func (s *Server) requestedSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.URL.Query().Get("name")
-	if name == "" {
-		writeErr(w, http.StatusBadRequest, "name is required")
+	if name == "" || !validSecretName(name) {
+		writeErr(w, http.StatusBadRequest, "invalid or missing secret name")
 		return
 	}
 	var run store.Run

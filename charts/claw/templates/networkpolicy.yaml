@@ -11,11 +11,27 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    - ports:
+    # API + UI: only from agent pods, the controller's own namespace, and the GKE
+    # external LB health-check/proxy ranges (for the intake/admin Ingress).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: claw-agents
+        - ipBlock:
+            cidr: 130.211.0.0/22
+        - ipBlock:
+            cidr: 35.191.0.0/16
+      ports:
         - protocol: TCP
           port: {{ .Values.service.apiPort }}
         - protocol: TCP
           port: {{ .Values.service.uiPort }}
+    # Probe + metrics: left open so kubelet health checks (node IP, not a
+    # namespace/pod) and metrics scrapers are not blocked.
+    - ports:
         - protocol: TCP
           port: {{ .Values.service.metricsPort }}
         - protocol: TCP

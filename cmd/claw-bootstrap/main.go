@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -142,6 +143,14 @@ func writeSecret(m matSecret, dir string) error {
 	if path == "" {
 		path = filepath.Join(dir, m.Name)
 	}
+	// Constrain to the secrets dir so a bad delivery.path can't write a secret
+	// outside the tmpfs (and thus outside the wipe-on-exit scope).
+	clean := filepath.Clean(path)
+	cleanDir := filepath.Clean(dir)
+	if clean != cleanDir && !strings.HasPrefix(clean, cleanDir+string(os.PathSeparator)) {
+		return fmt.Errorf("delivery path %q is outside the secrets dir %q", path, dir)
+	}
+	path = clean
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}

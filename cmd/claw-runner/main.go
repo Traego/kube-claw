@@ -142,6 +142,7 @@ func signalSleep(controllerURL, sessionID string) {
 	if err != nil {
 		return
 	}
+	authClawToken(req)
 	if resp, err := http.DefaultClient.Do(req); err == nil {
 		resp.Body.Close()
 	}
@@ -156,6 +157,7 @@ func claimNextTurn(controllerURL, sessionID, pod string) (runID, input string, o
 	if err != nil {
 		return "", "", false
 	}
+	authClawToken(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", "", false
@@ -320,6 +322,7 @@ func postOutput(controllerURL, runID, content string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	authClawToken(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -329,4 +332,12 @@ func postOutput(controllerURL, runID, content string) error {
 		return fmt.Errorf("controller returned %s", resp.Status)
 	}
 	return nil
+}
+
+// authClawToken adds the run session token (set by claw-bootstrap) so the
+// controller can authenticate runner callbacks.
+func authClawToken(req *http.Request) {
+	if t := os.Getenv("CLAW_TOKEN"); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
 }

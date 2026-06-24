@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -186,10 +187,13 @@ func (r *AgentReconciler) ensurePVC(ctx context.Context, agent *clawv1alpha1.Age
 }
 
 func (r *AgentReconciler) ensureNetworkPolicy(ctx context.Context, agent *clawv1alpha1.Agent) error {
-	// Baseline: deny all ingress to agent pods. Egress FQDN-pinning to
-	// spec.network.egressAllowHosts needs a CNI with FQDN policy (Cilium /
-	// GKE Dataplane V2 FQDN) — tracked as a follow-up; vanilla NetworkPolicy
-	// cannot match DNS names.
+	// Baseline: deny all ingress to agent pods, and constrain egress to DNS, the
+	// controller, and the public internet — denying east/west to other in-cluster
+	// pods/services (private CIDRs). FQDN-pinning the internet rule to
+	// spec.network.egressAllowHosts (api.anthropic.com / cloud APIs) still needs a
+	// CNI with FQDN policy (Cilium / GKE Dataplane V2) — tracked as a follow-up.
+	udp, tcp := corev1.ProtocolUDP, corev1.ProtocolTCP
+	dnsPort := intstr.FromInt(53)
 	np := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: agent.Name + "-agent", Namespace: agent.Namespace},
 	}
@@ -197,11 +201,31 @@ func (r *AgentReconciler) ensureNetworkPolicy(ctx context.Context, agent *clawv1
 		np.Labels = agentLabels(agent.Name)
 		np.Spec = networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"claw.run/agent": agent.Name}},
-			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				{ // DNS resolution (kube-dns in kube-system)
+					To:    []networkingv1.NetworkPolicyPeer{{NamespaceSelector: nsSelector("kube-system")}},
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: &udp, Port: &dnsPort}, {Protocol: &tcp, Port: &dnsPort}},
+				},
+				{ // the claw controller (login, materialize, run callbacks)
+					To: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: nsSelector("claw-system")}},
+				},
+				{ // public internet (model + cloud APIs); private ranges excluded → no east/west
+					To: []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{
+						CIDR:   "0.0.0.0/0",
+						Except: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"},
+					}}},
+				},
+			},
 		}
 		return controllerutil.SetControllerReference(agent, np, r.Scheme)
 	})
 	return err
+}
+
+// nsSelector matches a namespace by its standard metadata.name label.
+func nsSelector(name string) *metav1.LabelSelector {
+	return &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": name}}
 }
 
 // SetupWithManager wires the reconciler and the objects it owns.

@@ -12,6 +12,10 @@ import (
 // follow-up message) in its thread. 204 when there's nothing pending.
 func (s *Server) claimNextTurn(w http.ResponseWriter, r *http.Request) {
 	sid := r.PathValue("id")
+	if !s.authSession(r, sid) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
 	pod := r.URL.Query().Get("pod")
 	var run store.Run
 	var ok bool
@@ -40,6 +44,10 @@ func (s *Server) claimNextTurn(w http.ResponseWriter, r *http.Request) {
 // sees the agent went to sleep.
 func (s *Server) sessionSleep(w http.ResponseWriter, r *http.Request) {
 	sid := r.PathValue("id")
+	if !s.authSession(r, sid) {
+		writeErr(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
 	if s.Notifier != nil {
 		var channel string
 		_ = s.Store.Tx(r.Context(), func(tx store.Tx) error {

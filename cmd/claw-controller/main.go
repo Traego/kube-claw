@@ -170,7 +170,8 @@ func main() {
 		Approvals:     approvalSvc,
 		Router:        slackRt,
 		Notifier:      slackNotifier,
-		AdminPassword: os.Getenv("CLAW_ADMIN_PASSWORD"),
+		AdminPassword:         os.Getenv("CLAW_ADMIN_PASSWORD"),
+		EnableFakeSlackEvents: os.Getenv("CLAW_ENABLE_FAKE_SLACK") == "true",
 	}); err != nil {
 		log.Error(err, "unable to add HTTP API server")
 		os.Exit(1)

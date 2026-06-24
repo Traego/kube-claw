@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -74,11 +75,19 @@ func fullServer(t *testing.T, seed ...client.Object) *Server {
 
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return doAuth(t, h, method, path, body, "")
+}
+
+func doAuth(t *testing.T, h http.Handler, method, path, body, token string) *httptest.ResponseRecorder {
+	t.Helper()
 	var r *http.Request
 	if body != "" {
 		r = httptest.NewRequest(method, path, strings.NewReader(body))
 	} else {
 		r = httptest.NewRequest(method, path, nil)
+	}
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
 	}
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, r)
@@ -172,18 +181,23 @@ func TestPostOutputAndGetRun(t *testing.T) {
 		return tx.CreateRun(store.Run{ID: "run-1", AgentNamespace: "claw-agents", AgentName: "gcp-cost", Phase: "Running"})
 	})
 
-	// runner posts an output → run marked Succeeded.
-	if rr := do(t, h, "POST", "/v1/runs/run-1/outputs", `{"kind":"text","content":"hello world"}`); rr.Code != 200 {
+	tok, _ := s.Signer.Issue("run-1", nil, time.Hour)
+	// runner posts an output (with its session token) → run marked Succeeded.
+	if rr := doAuth(t, h, "POST", "/v1/runs/run-1/outputs", `{"kind":"text","content":"hello world"}`, tok); rr.Code != 200 {
 		t.Fatalf("postOutput = %d (%s)", rr.Code, rr.Body)
+	}
+	// unauthenticated output → 401.
+	if rr := do(t, h, "POST", "/v1/runs/run-1/outputs", `{"content":"x"}`); rr.Code != 401 {
+		t.Fatalf("postOutput no-token = %d, want 401", rr.Code)
 	}
 	// GET shows the output + Succeeded.
 	rr := do(t, h, "GET", "/v1/runs/run-1", "")
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "hello world") || !strings.Contains(rr.Body.String(), "Succeeded") {
 		t.Fatalf("getRun = %d body=%s", rr.Code, rr.Body)
 	}
-	// output to unknown run → 404.
-	if rr := do(t, h, "POST", "/v1/runs/nope/outputs", `{"content":"x"}`); rr.Code != 404 {
-		t.Fatalf("postOutput unknown = %d, want 404", rr.Code)
+	// output to a run the token isn't for → 401 (auth fires before the 404 lookup).
+	if rr := doAuth(t, h, "POST", "/v1/runs/nope/outputs", `{"content":"x"}`, tok); rr.Code != 401 {
+		t.Fatalf("postOutput wrong-run = %d, want 401", rr.Code)
 	}
 }
 
